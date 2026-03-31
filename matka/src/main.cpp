@@ -1048,34 +1048,45 @@ let fd=new FormData();fd.append('firmware',f);
 xhr.send(fd);
 }
 
-function uploadOTASat(){
+async function uploadOTASat(){
 let f=document.getElementById('otaSatFile').files[0];
 if(!f){document.getElementById('otaSatStatus').textContent='Wybierz plik .bin!';return}
 let btn=document.getElementById('otaSatBtn');
 btn.disabled=true;btn.textContent='Wgrywanie...';
 document.getElementById('otaSatBarWrap').style.display='block';
-let xhr=new XMLHttpRequest();
-xhr.open('POST','/ota/satelita');
-xhr.upload.onprogress=function(e){
-if(e.lengthComputable){
-let p=Math.round(e.loaded/e.total*100);
-document.getElementById('otaSatBar').style.width=p+'%';
-document.getElementById('otaSatStatus').textContent=p+'%';
-}};
-xhr.onload=function(){
-if(xhr.responseText==='OK'){
-document.getElementById('otaSatStatus').textContent='Zapisano! Wszystkie satelity pobiorza przy nastepnym budzeniu.';
+let st=document.getElementById('otaSatStatus');
+let bar=document.getElementById('otaSatBar');
+try{
+// Begin
+let r=await fetch('/ota/satelita/begin?size='+f.size,{method:'POST'});
+if(!r.ok)throw new Error('begin failed');
+// Chunked upload 8KB z delay
+let chunkSize=8192;
+let sent=0;
+let buf=await f.arrayBuffer();
+while(sent<f.size){
+let end=Math.min(sent+chunkSize,f.size);
+let chunk=buf.slice(sent,end);
+let cr=await fetch('/ota/satelita/chunk',{method:'POST',body:chunk,headers:{'Content-Type':'application/octet-stream'}});
+if(!cr.ok)throw new Error('chunk failed at '+sent);
+sent=end;
+let p=Math.round(sent/f.size*100);
+bar.style.width=p+'%';
+st.textContent=p+'% ('+Math.round(sent/1024)+'/'+Math.round(f.size/1024)+' KB)';
+await new Promise(r=>setTimeout(r,50));
+}
+// Finish
+let fr=await fetch('/ota/satelita/finish',{method:'POST'});
+let fsize=await fr.text();
+if(parseInt(fsize)===f.size){
+st.textContent='OK! '+Math.round(f.size/1024)+' KB zapisane. Satelity pobiorza przy nastepnym budzeniu.';
 }else{
-document.getElementById('otaSatStatus').textContent='BLAD: '+xhr.responseText;
+st.textContent='UWAGA: plik na Matce ma '+fsize+' bajtow (powinno byc '+f.size+')';
+}
+}catch(e){
+st.textContent='BLAD: '+e.message;
 }
 btn.disabled=false;btn.textContent='Wgraj firmware Satelity';
-};
-xhr.onerror=function(){
-document.getElementById('otaSatStatus').textContent='Blad polaczenia';
-btn.disabled=false;btn.textContent='Wgraj firmware Satelity';
-};
-let fd=new FormData();fd.append('firmware',f);
-xhr.send(fd);
 }
 
 // === Ustawienia ===
@@ -1388,63 +1399,58 @@ void setupServer() {
         }
     );
 
-    // OTA Satelity — zapis .bin do LittleFS
-    server.on("/ota/satelita", HTTP_POST,
-        [](AsyncWebServerRequest *req) {
-            bool ok = LittleFS.exists("/ota/satelita.bin");
-            req->send(200, "text/plain", ok ? "OK" : "BLAD");
-            if (ok) {
-                // Ustaw OTA pending dla wszystkich satelitów
-                for (int i = 0; i < ile_satelit; i++) {
-                    satelity[i].ota_pending = true;
-                }
-                Serial.printf("[OTA-SAT] Flaga ustawiona dla %d satelitow\n", ile_satelit);
-            }
-        },
-        [](AsyncWebServerRequest *req, const String &filename, size_t index,
-           uint8_t *data, size_t len, bool final) {
-            static File f;
-            if (!index) {
-                Serial.printf("[OTA-SAT] Start: %s (%u bajtow)\n", filename.c_str(), req->contentLength());
-                LittleFS.mkdir("/ota");
-                LittleFS.remove("/ota/satelita.bin");
-                f = LittleFS.open("/ota/satelita.bin", "w");
-                if (!f) {
-                    Serial.println("[OTA-SAT] BLAD otwarcia pliku!");
-                    return;
-                }
-            }
-            if (f) {
-                size_t w = 0;
-                while (w < len) {
-                    size_t chunk = min((size_t)512, len - w);
-                    size_t written = f.write(data + w, chunk);
-                    if (written != chunk) {
-                        Serial.printf("[OTA-SAT] BLAD zapisu: %u/%u na offset %u\n", written, chunk, index + w);
-                        break;
-                    }
-                    w += written;
-                }
-                // Flush co 64KB
-                if ((index + len) % 65536 < len) {
-                    f.flush();
-                    Serial.printf("[OTA-SAT] %u bajtow...\n", index + len);
-                }
-            }
-            if (final) {
-                if (f) {
-                    f.flush();
-                    f.close();
-                    // Sprawdź rozmiar zapisanego pliku
-                    File check = LittleFS.open("/ota/satelita.bin", "r");
-                    if (check) {
-                        Serial.printf("[OTA-SAT] Zapisano: %u bajtow (plik: %u)\n", index + len, check.size());
-                        check.close();
-                    }
-                }
-            }
+    // OTA Satelity — chunked upload API
+    // POST /ota/satelita/begin?size=XXXXX — rozpocznij upload
+    server.on("/ota/satelita/begin", HTTP_POST, [](AsyncWebServerRequest *req) {
+        if (!req->hasParam("size")) {
+            req->send(400, "text/plain", "brak size");
+            return;
         }
-    );
+        int totalSize = req->getParam("size")->value().toInt();
+        Serial.printf("[OTA-SAT] Begin: %d bajtow\n", totalSize);
+        LittleFS.mkdir("/ota");
+        LittleFS.remove("/ota/satelita.bin");
+        File f = LittleFS.open("/ota/satelita.bin", "w");
+        if (!f) {
+            req->send(500, "text/plain", "BLAD otwarcia pliku");
+            return;
+        }
+        f.close();
+        req->send(200, "text/plain", "OK");
+    });
+
+    // POST /ota/satelita/chunk — body = raw binary, append to file
+    server.on("/ota/satelita/chunk", HTTP_POST, [](AsyncWebServerRequest *req) {
+        req->send(200, "text/plain", "OK");
+    }, NULL,
+    [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
+        File f = LittleFS.open("/ota/satelita.bin", "a");
+        if (f) {
+            f.write(data, len);
+            f.close();
+        }
+    });
+
+    // POST /ota/satelita/finish — zakończ i ustaw flagę OTA
+    server.on("/ota/satelita/finish", HTTP_POST, [](AsyncWebServerRequest *req) {
+        File f = LittleFS.open("/ota/satelita.bin", "r");
+        if (!f) {
+            req->send(500, "text/plain", "BLAD");
+            return;
+        }
+        size_t fileSize = f.size();
+        f.close();
+        Serial.printf("[OTA-SAT] Finish: plik %u bajtow\n", fileSize);
+
+        // Ustaw OTA pending
+        for (int i = 0; i < ile_satelit; i++) {
+            satelity[i].ota_pending = true;
+        }
+        Serial.printf("[OTA-SAT] Flaga ustawiona dla %d satelitow\n", ile_satelit);
+
+        String resp = String(fileSize);
+        req->send(200, "text/plain", resp);
+    });
 
     // Serwowanie .bin dla Satelity
     server.on("/ota/satelita.bin", HTTP_GET, [](AsyncWebServerRequest *req) {
