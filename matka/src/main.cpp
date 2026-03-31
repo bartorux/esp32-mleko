@@ -1415,9 +1415,20 @@ void setupServer() {
                 }
             }
             if (f) {
-                size_t written = f.write(data, len);
-                if (written != len) {
-                    Serial.printf("[OTA-SAT] BLAD zapisu: %u/%u na offset %u\n", written, len, index);
+                size_t w = 0;
+                while (w < len) {
+                    size_t chunk = min((size_t)512, len - w);
+                    size_t written = f.write(data + w, chunk);
+                    if (written != chunk) {
+                        Serial.printf("[OTA-SAT] BLAD zapisu: %u/%u na offset %u\n", written, chunk, index + w);
+                        break;
+                    }
+                    w += written;
+                }
+                // Flush co 64KB
+                if ((index + len) % 65536 < len) {
+                    f.flush();
+                    Serial.printf("[OTA-SAT] %u bajtow...\n", index + len);
                 }
             }
             if (final) {

@@ -10,7 +10,7 @@
 
 // === Wersja ===
 
-#define SAT_FW_VERSION "2.3"
+#define SAT_FW_VERSION "2.4"
 
 // === Konfiguracja ===
 
@@ -200,9 +200,10 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     Serial.printf("\n[OTA] WiFi OK! IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("[OTA] Pobieram: %s\n", url);
 
+    // Pobierz rozmiar pliku
     HTTPClient http;
     http.begin(url);
-    http.setTimeout(30000);
+    http.setTimeout(15000);
     int code = http.GET();
 
     if (code != 200) {
@@ -212,9 +213,10 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     }
 
     int totalSize = http.getSize();
+    http.end(); // zamknij — będziemy pobierać chunkami
+
     if (totalSize <= 0) {
         Serial.println("[OTA] Pusty plik!");
-        http.end();
         return;
     }
 
@@ -223,39 +225,93 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     if (!Update.begin(totalSize)) {
         Serial.println("[OTA] Update.begin failed!");
         Update.printError(Serial);
-        http.end();
         return;
     }
 
-    WiFiClient *stream = http.getStreamPtr();
-    uint8_t buf[1024];
+    // Pobieraj chunkami z retry — każdy chunk 64KB
     int written = 0;
+    int chunkSize = 32768;
+    int maxRetries = 3;
 
-    while (http.connected() && written < totalSize) {
-        int available = stream->available();
-        if (available > 0) {
-            int readBytes = stream->readBytes(buf, min(available, (int)sizeof(buf)));
-            Update.write(buf, readBytes);
-            written += readBytes;
-            if (written % 32768 == 0) {
-                Serial.printf("[OTA] %d / %d bajtow\n", written, totalSize);
+    while (written < totalSize) {
+        int remaining = totalSize - written;
+        int toFetch = min(remaining, chunkSize);
+        bool chunkOk = false;
+
+        for (int retry = 0; retry < maxRetries && !chunkOk; retry++) {
+            if (retry > 0) {
+                Serial.printf("[OTA] Retry chunk %d...\n", retry);
+                delay(1000);
+            }
+
+            HTTPClient chunkHttp;
+            chunkHttp.begin(url);
+            chunkHttp.setTimeout(15000);
+            // HTTP Range request
+            String rangeHeader = "bytes=" + String(written) + "-" + String(written + toFetch - 1);
+            chunkHttp.addHeader("Range", rangeHeader);
+
+            int chunkCode = chunkHttp.GET();
+            if (chunkCode != 206 && chunkCode != 200) {
+                Serial.printf("[OTA] Chunk HTTP blad: %d\n", chunkCode);
+                chunkHttp.end();
+                continue;
+            }
+
+            WiFiClient *stream = chunkHttp.getStreamPtr();
+            uint8_t buf[512];
+            int chunkWritten = 0;
+            unsigned long lastData = millis();
+
+            while (chunkWritten < toFetch) {
+                int available = stream->available();
+                if (available > 0) {
+                    int toRead = min(available, min(toFetch - chunkWritten, (int)sizeof(buf)));
+                    int readBytes = stream->readBytes(buf, toRead);
+                    if (readBytes > 0) {
+                        Update.write(buf, readBytes);
+                        chunkWritten += readBytes;
+                        lastData = millis();
+                    }
+                } else {
+                    if (millis() - lastData > 10000) break;
+                    delay(5);
+                    yield();
+                }
+            }
+
+            chunkHttp.end();
+
+            if (chunkWritten == toFetch) {
+                chunkOk = true;
+                written += chunkWritten;
+                Serial.printf("[OTA] %d / %d (%d%%)\n", written, totalSize, written * 100 / totalSize);
+            } else {
+                Serial.printf("[OTA] Chunk niepelny: %d / %d\n", chunkWritten, toFetch);
+                // Nie możemy kontynuować Update z luką — abort
+                break;
             }
         }
-        delay(1);
+
+        if (!chunkOk) {
+            Serial.println("[OTA] Nie udalo sie pobrac chunk — abort");
+            break;
+        }
     }
 
-    if (Update.end(true)) {
-        Serial.printf("[OTA] Sukces! %d bajtow. Restart...\n", written);
+    Serial.printf("[OTA] Pobrano: %d / %d bajtow\n", written, totalSize);
+
+    if (written == totalSize && Update.end(true)) {
+        Serial.println("[OTA] Sukces! Restart...");
         delay(500);
         ESP.restart();
     } else {
-        Serial.println("[OTA] Update.end failed!");
+        Serial.println("[OTA] BLAD!");
         Update.printError(Serial);
     }
 
     http.end();
-    // OTA fail — restart żeby odzyskać ESP-NOW
-    Serial.println("[OTA] Restart po bledzie...");
+    Serial.println("[OTA] Restart...");
     delay(500);
     ESP.restart();
 }
@@ -279,7 +335,7 @@ void setup() {
 
     Serial.println();
     Serial.println("================================");
-    Serial.println("  SATELITA — Smart Mleko v2.0");
+    Serial.printf("  SATELITA — Smart Mleko v%s\n", SAT_FW_VERSION);
     Serial.printf("  ID: %d  TYP: %s\n", id_czujnika, typ_zasilania == 1 ? "bateria" : "zasilacz");
     Serial.println("================================");
 
