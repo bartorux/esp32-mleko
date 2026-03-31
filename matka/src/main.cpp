@@ -40,7 +40,7 @@ unsigned long ostatni_telegram = 0;
 const unsigned long TELEGRAM_COOLDOWN = 300000; // 5 min między alertami
 long telegram_offset = 0;
 unsigned long ostatni_poll = 0;
-const unsigned long POLL_INTERVAL = 3000; // sprawdzaj komendy co 3s
+const unsigned long POLL_INTERVAL = 10000; // sprawdzaj komendy co 10s (rzadziej = mniej blokuje ESP-NOW)
 
 // === Preferences ===
 
@@ -69,6 +69,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  godzina_stop;
     bool     ota_pending;
     char     ota_url[64];
+    char     wifi_ssid[32];
+    char     wifi_pass[64];
 } struct_ack;
 
 // === Multi-Satellite ===
@@ -251,9 +253,16 @@ void wyslijACK(SatelitaInfo *s) {
     ack.godzina_stop = 0;
     ack.ota_pending = s->ota_pending;
     memset(ack.ota_url, 0, sizeof(ack.ota_url));
+    memset(ack.wifi_ssid, 0, sizeof(ack.wifi_ssid));
+    memset(ack.wifi_pass, 0, sizeof(ack.wifi_pass));
     if (s->ota_pending) {
         String url = "http://" + ip_adres + "/ota/satelita.bin";
         strlcpy(ack.ota_url, url.c_str(), sizeof(ack.ota_url));
+        // Wyślij WiFi credentials żeby Satelita mogła pobrać .bin
+        String ssid = WiFi.SSID();
+        String pass = WiFi.psk();
+        strlcpy(ack.wifi_ssid, ssid.c_str(), sizeof(ack.wifi_ssid));
+        strlcpy(ack.wifi_pass, pass.c_str(), sizeof(ack.wifi_pass));
         Serial.printf("[ACK] OTA dla #%d: %s\n", s->id, ack.ota_url);
     }
 
@@ -1394,22 +1403,33 @@ void setupServer() {
         },
         [](AsyncWebServerRequest *req, const String &filename, size_t index,
            uint8_t *data, size_t len, bool final) {
+            static File f;
             if (!index) {
-                Serial.printf("[OTA-SAT] Start: %s\n", filename.c_str());
+                Serial.printf("[OTA-SAT] Start: %s (%u bajtow)\n", filename.c_str(), req->contentLength());
                 LittleFS.mkdir("/ota");
-                ota_satelity_file = LittleFS.open("/ota/satelita.bin", "w");
-                if (!ota_satelity_file) {
+                LittleFS.remove("/ota/satelita.bin");
+                f = LittleFS.open("/ota/satelita.bin", "w");
+                if (!f) {
                     Serial.println("[OTA-SAT] BLAD otwarcia pliku!");
                     return;
                 }
             }
-            if (ota_satelity_file) {
-                ota_satelity_file.write(data, len);
+            if (f) {
+                size_t written = f.write(data, len);
+                if (written != len) {
+                    Serial.printf("[OTA-SAT] BLAD zapisu: %u/%u na offset %u\n", written, len, index);
+                }
             }
             if (final) {
-                if (ota_satelity_file) {
-                    ota_satelity_file.close();
-                    Serial.printf("[OTA-SAT] Zapisano: %u bajtow\n", index + len);
+                if (f) {
+                    f.flush();
+                    f.close();
+                    // Sprawdź rozmiar zapisanego pliku
+                    File check = LittleFS.open("/ota/satelita.bin", "r");
+                    if (check) {
+                        Serial.printf("[OTA-SAT] Zapisano: %u bajtow (plik: %u)\n", index + len, check.size());
+                        check.close();
+                    }
                 }
             }
         }

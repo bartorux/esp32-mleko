@@ -10,7 +10,7 @@
 
 // === Wersja ===
 
-#define SAT_FW_VERSION "2.1"
+#define SAT_FW_VERSION "2.3"
 
 // === Konfiguracja ===
 
@@ -30,7 +30,7 @@
 #endif
 
 #define INTERWAL_DOMYSLNY_S 1800  // 30 minut
-#define TIMEOUT_ACK_MS      1000
+#define TIMEOUT_ACK_MS      2000
 
 // MAC adres Matki — z Serial Monitor
 uint8_t adresMatki[] = {0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8};
@@ -53,6 +53,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  godzina_stop;
     bool     ota_pending;
     char     ota_url[64];
+    char     wifi_ssid[32];
+    char     wifi_pass[64];
 } struct_ack;
 
 // === Zmienne globalne ===
@@ -174,22 +176,30 @@ bool znajdzKanal() {
 
 // === OTA Download ===
 
-void wykonajOTA(const char *url) {
+void wykonajOTA(const char *url, const char *ssid, const char *pass) {
+    Serial.printf("[OTA] Laczenie z WiFi: %s\n", ssid);
+
+    // Rozłącz ESP-NOW i połącz do WiFi
+    esp_now_deinit();
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, pass);
+
+    int proby = 0;
+    while (WiFi.status() != WL_CONNECTED && proby < 30) {
+        delay(500);
+        Serial.print(".");
+        proby++;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\n[OTA] WiFi nie polaczone — rezygnuje");
+        WiFi.disconnect();
+        ESP.restart(); // restart żeby wrócić do ESP-NOW
+        return;
+    }
+    Serial.printf("\n[OTA] WiFi OK! IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("[OTA] Pobieram: %s\n", url);
 
-    // ESP-NOW i WiFi STA nie mogą działać jednocześnie z HTTP
-    // Musimy tymczasowo połączyć się z WiFi żeby pobrać .bin
-    // Satelita nie zna hasła WiFi — ale Matka serwuje na IP w LAN
-    // Więc Satelita musi się połączyć do tej samej sieci
-    // Problem: Satelita nie ma credentials WiFi!
-    // Rozwiązanie: używamy esp_wifi w trybie STA z dowolnym SSID
-    // i łączymy się po IP — ale to wymaga bycia w sieci...
-
-    // Prostsze: Satelita łączy się tymczasowo do Matki po WiFi
-    // Matka serwuje plik, Satelita pobiera HTTP
-    // Na razie: spróbuj HTTP bez pełnego WiFi (ESP-NOW jest na tym samym kanale)
-
-    WiFi.mode(WIFI_STA);
     HTTPClient http;
     http.begin(url);
     http.setTimeout(30000);
@@ -244,6 +254,10 @@ void wykonajOTA(const char *url) {
     }
 
     http.end();
+    // OTA fail — restart żeby odzyskać ESP-NOW
+    Serial.println("[OTA] Restart po bledzie...");
+    delay(500);
+    ESP.restart();
 }
 
 // === Setup ===
@@ -326,13 +340,11 @@ void loop() {
     if (ostatni_kanal > 0) {
         esp_wifi_set_channel(ostatni_kanal, WIFI_SECOND_CHAN_NONE);
         Serial.printf("[CH] Hint: kanal %d\n", ostatni_kanal);
-        // Próba 1
-        if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
-            polaczono = true;
-        } else {
-            // Próba 2 — może Matka była zajęta
-            Serial.println("[CH] Hint retry...");
-            delay(200);
+        for (int retry = 0; retry < 3 && !polaczono; retry++) {
+            if (retry > 0) {
+                Serial.printf("[CH] Hint retry %d...\n", retry);
+                delay(500);
+            }
             if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
                 polaczono = true;
             }
@@ -363,9 +375,9 @@ void loop() {
             interwal_s = ostatni_ack.nowy_interwal_s;
             Serial.printf("[ACK] Nowy interwal: %d s\n", interwal_s);
         }
-        if (ostatni_ack.ota_pending) {
+        if (ostatni_ack.ota_pending && strlen(ostatni_ack.ota_url) > 0 && strlen(ostatni_ack.wifi_ssid) > 0) {
             Serial.printf("[ACK] OTA czeka: %s\n", ostatni_ack.ota_url);
-            wykonajOTA(ostatni_ack.ota_url);
+            wykonajOTA(ostatni_ack.ota_url, ostatni_ack.wifi_ssid, ostatni_ack.wifi_pass);
         }
     }
 
