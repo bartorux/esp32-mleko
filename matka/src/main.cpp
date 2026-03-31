@@ -60,6 +60,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  bateria_procent;
     uint32_t timestamp;
     bool     blad_czujnika;
+    char     fw_version[8];   // wersja firmware satelity
 } struct_message;
 
 typedef struct __attribute__((packed)) {
@@ -929,7 +930,8 @@ else{arrow='\u2192';cls='color:#94a3b8'}
 let sign=s.trend>=0?'+':'';
 trendHtml='<div style="font-size:1.2em;margin-top:8px"><span style="'+cls+'">'+arrow+' '+sign+s.trend.toFixed(1)+'\u00b0C/h</span></div>';
 }
-html+='<div class="card"><h2>Czujnik #'+s.id+' <span class="sat-type">'+typIcon+' '+typName+'</span></h2>';
+let fwInfo=s.fw?' v'+s.fw:'';
+html+='<div class="card"><h2>Czujnik #'+s.id+' <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
 html+='<div class="temp-display"><span class="'+tempClass+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
 html+='<div class="info-grid">';
@@ -1248,6 +1250,7 @@ void setupServer() {
             o["bateria"] = s->pomiar.bateria_procent;
             o["blad_czujnika"] = s->pomiar.blad_czujnika;
             o["ostatni"] = czasOd(s->ostatni_czas);
+            o["fw"] = s->pomiar.fw_version;
 
             // Trend °C/h z historii
             if (s->hist_count >= 2) {

@@ -5,6 +5,12 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Preferences.h>
+#include <HTTPClient.h>
+#include <Update.h>
+
+// === Wersja ===
+
+#define SAT_FW_VERSION "2.1"
 
 // === Konfiguracja ===
 
@@ -24,7 +30,7 @@
 #endif
 
 #define INTERWAL_DOMYSLNY_S 1800  // 30 minut
-#define TIMEOUT_ACK_MS      500
+#define TIMEOUT_ACK_MS      1000
 
 // MAC adres Matki — z Serial Monitor
 uint8_t adresMatki[] = {0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8};
@@ -38,6 +44,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  bateria_procent;
     uint32_t timestamp;
     bool     blad_czujnika;
+    char     fw_version[8];   // wersja firmware satelity
 } struct_message;
 
 typedef struct __attribute__((packed)) {
@@ -60,6 +67,9 @@ DallasTemperature czujniki(&oneWire);
 volatile bool ack_otrzymany = false;
 struct_ack ostatni_ack;
 uint32_t interwal_s = INTERWAL_DOMYSLNY_S;
+
+// Kanał WiFi — zapisywany w RTC RAM (przeżywa deep sleep, nie przeżywa power off)
+RTC_DATA_ATTR uint8_t ostatni_kanal = 0;
 
 // Na etapie debugowania używamy delay() zamiast Deep Sleep
 // Deep Sleep wprowadzimy w Etapie 2
@@ -117,6 +127,7 @@ bool wyslijPomiar(float temp, bool blad, uint8_t bateria) {
     msg.bateria_procent = bateria;
     msg.timestamp = millis() / 1000;
     msg.blad_czujnika = blad;
+    strlcpy(msg.fw_version, SAT_FW_VERSION, sizeof(msg.fw_version));
 
     Serial.println("========================================");
     if (blad) {
@@ -152,12 +163,87 @@ bool znajdzKanal() {
 
         if (wyslijPomiar(0, true, 0) && czekajNaACK()) {
             Serial.printf("ZNALEZIONO!\n");
+            ostatni_kanal = k;
             return true;
         }
         Serial.printf("brak\n");
     }
     Serial.println("[CH] Nie znaleziono Matki na zadnym kanale!");
     return false;
+}
+
+// === OTA Download ===
+
+void wykonajOTA(const char *url) {
+    Serial.printf("[OTA] Pobieram: %s\n", url);
+
+    // ESP-NOW i WiFi STA nie mogą działać jednocześnie z HTTP
+    // Musimy tymczasowo połączyć się z WiFi żeby pobrać .bin
+    // Satelita nie zna hasła WiFi — ale Matka serwuje na IP w LAN
+    // Więc Satelita musi się połączyć do tej samej sieci
+    // Problem: Satelita nie ma credentials WiFi!
+    // Rozwiązanie: używamy esp_wifi w trybie STA z dowolnym SSID
+    // i łączymy się po IP — ale to wymaga bycia w sieci...
+
+    // Prostsze: Satelita łączy się tymczasowo do Matki po WiFi
+    // Matka serwuje plik, Satelita pobiera HTTP
+    // Na razie: spróbuj HTTP bez pełnego WiFi (ESP-NOW jest na tym samym kanale)
+
+    WiFi.mode(WIFI_STA);
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(30000);
+    int code = http.GET();
+
+    if (code != 200) {
+        Serial.printf("[OTA] HTTP blad: %d\n", code);
+        http.end();
+        return;
+    }
+
+    int totalSize = http.getSize();
+    if (totalSize <= 0) {
+        Serial.println("[OTA] Pusty plik!");
+        http.end();
+        return;
+    }
+
+    Serial.printf("[OTA] Rozmiar: %d bajtow\n", totalSize);
+
+    if (!Update.begin(totalSize)) {
+        Serial.println("[OTA] Update.begin failed!");
+        Update.printError(Serial);
+        http.end();
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint8_t buf[1024];
+    int written = 0;
+
+    while (http.connected() && written < totalSize) {
+        int available = stream->available();
+        if (available > 0) {
+            int readBytes = stream->readBytes(buf, min(available, (int)sizeof(buf)));
+            Update.write(buf, readBytes);
+            written += readBytes;
+            if (written % 32768 == 0) {
+                Serial.printf("[OTA] %d / %d bajtow\n", written, totalSize);
+            }
+        }
+        delay(1);
+    }
+
+    if (Update.end(true)) {
+        Serial.printf("[OTA] Sukces! %d bajtow. Restart...\n", written);
+        delay(500);
+        ESP.restart();
+    } else {
+        Serial.println("[OTA] Update.end failed!");
+        Update.printError(Serial);
+    }
+
+    http.end();
 }
 
 // === Setup ===
@@ -235,21 +321,51 @@ void loop() {
     uint8_t bateria = odczytajBaterie();
     #endif
 
-    // Wyślij
-    if (wyslijPomiar(temp, blad, bateria)) {
-        if (czekajNaACK()) {
-            // Sprawdź nowy interwał
-            if (ostatni_ack.nowy_interwal_s > 0) {
-                interwal_s = ostatni_ack.nowy_interwal_s;
-                Serial.printf("[ACK] Nowy interwal: %d s\n", interwal_s);
+    // Ustaw ostatnio znany kanał (hint z RTC RAM)
+    bool polaczono = false;
+    if (ostatni_kanal > 0) {
+        esp_wifi_set_channel(ostatni_kanal, WIFI_SECOND_CHAN_NONE);
+        Serial.printf("[CH] Hint: kanal %d\n", ostatni_kanal);
+        // Próba 1
+        if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
+            polaczono = true;
+        } else {
+            // Próba 2 — może Matka była zajęta
+            Serial.println("[CH] Hint retry...");
+            delay(200);
+            if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
+                polaczono = true;
             }
-            if (ostatni_ack.ota_pending) {
-                Serial.printf("[ACK] OTA czeka: %s\n", ostatni_ack.ota_url);
-                // OTA będzie w Etapie 5
-            }
+        }
+    }
+
+    // Fallback — channel hopping jeśli hint nie zadziałał
+    if (!polaczono) {
+        if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
+            polaczono = true;
         } else {
             Serial.println("[WARN] Brak ACK — proba channel hopping...");
-            znajdzKanal();
+            if (znajdzKanal()) {
+                polaczono = true;
+            }
+        }
+    }
+
+    // Obsługa ACK — interwał, OTA
+    if (polaczono) {
+        // Zapisz kanał na przyszłość
+        uint8_t kanal;
+        wifi_second_chan_t second;
+        esp_wifi_get_channel(&kanal, &second);
+        ostatni_kanal = kanal;
+
+        if (ostatni_ack.nowy_interwal_s > 0) {
+            interwal_s = ostatni_ack.nowy_interwal_s;
+            Serial.printf("[ACK] Nowy interwal: %d s\n", interwal_s);
+        }
+        if (ostatni_ack.ota_pending) {
+            Serial.printf("[ACK] OTA czeka: %s\n", ostatni_ack.ota_url);
+            wykonajOTA(ostatni_ack.ota_url);
         }
     }
 
