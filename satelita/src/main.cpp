@@ -12,10 +12,17 @@
 // Po pierwszym uruchomieniu zapisywane do Preferences (NVS).
 // OTA NIE nadpisuje Preferences — ID i TYP są bezpieczne.
 #define DEFAULT_ID          1     // zmień przed pierwszym flashem USB
-#define DEFAULT_TYP         1     // 1 = bateria, 2 = zasilacz
-#define PIN_DS18B20         4
-#define PIN_ADC_BATERIA     34    // ⚠️ sprawdzić dla konkretnej płytki!
-#define WSPOLCZYNNIK_ADC    2.0f  // ⚠️ sprawdzić dla konkretnej płytki!
+
+#ifdef PLATFORM_C3
+  #define DEFAULT_TYP       2     // zasilacz (C3 Super Mini)
+  #define PIN_DS18B20       2     // GPIO2 na C3 Super Mini
+#else
+  #define DEFAULT_TYP       1     // bateria (ESP32-S3 + 18650)
+  #define PIN_DS18B20       4     // GPIO4 na WEMOS D1
+  #define PIN_ADC_BATERIA   34
+  #define WSPOLCZYNNIK_ADC  2.0f
+#endif
+
 #define INTERWAL_DOMYSLNY_S 1800  // 30 minut
 #define TIMEOUT_ACK_MS      500
 
@@ -89,6 +96,7 @@ float odczytajTemperature(bool &blad) {
 
 // === Odczyt baterii ===
 
+#ifndef PLATFORM_C3
 uint8_t odczytajBaterie() {
     int raw = analogRead(PIN_ADC_BATERIA);
     float napiecie = raw * (3.3f / 4095.0f) * WSPOLCZYNNIK_ADC;
@@ -97,6 +105,7 @@ uint8_t odczytajBaterie() {
     Serial.printf("[BAT] RAW=%d, V=%.2f, %d%%\n", raw, napiecie, procent);
     return (uint8_t)procent;
 }
+#endif
 
 // === Wysyłka pomiaru ===
 
@@ -220,7 +229,11 @@ void loop() {
     float temp = odczytajTemperature(blad);
 
     // Bateria
+    #ifdef PLATFORM_C3
+    uint8_t bateria = 100; // zasilacz — zawsze 100%
+    #else
     uint8_t bateria = odczytajBaterie();
+    #endif
 
     // Wyślij
     if (wyslijPomiar(temp, blad, bateria)) {
