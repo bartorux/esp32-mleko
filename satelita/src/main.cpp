@@ -4,10 +4,15 @@
 #include <esp_wifi.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <Preferences.h>
 
 // === Konfiguracja ===
 
-#define ID_CZUJNIKA         1
+// Domyślne wartości — używane TYLKO przy pierwszym flashu USB.
+// Po pierwszym uruchomieniu zapisywane do Preferences (NVS).
+// OTA NIE nadpisuje Preferences — ID i TYP są bezpieczne.
+#define DEFAULT_ID          1     // zmień przed pierwszym flashem USB
+#define DEFAULT_TYP         1     // 1 = bateria, 2 = zasilacz
 #define PIN_DS18B20         4
 #define PIN_ADC_BATERIA     34    // ⚠️ sprawdzić dla konkretnej płytki!
 #define WSPOLCZYNNIK_ADC    2.0f  // ⚠️ sprawdzić dla konkretnej płytki!
@@ -21,6 +26,7 @@ uint8_t adresMatki[] = {0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8};
 
 typedef struct __attribute__((packed)) {
     uint8_t  id_czujnika;
+    uint8_t  typ_zasilania;   // 1 = bateria (deep sleep), 2 = zasilacz (always on)
     float    temperatura;
     uint8_t  bateria_procent;
     uint32_t timestamp;
@@ -36,6 +42,10 @@ typedef struct __attribute__((packed)) {
 } struct_ack;
 
 // === Zmienne globalne ===
+
+Preferences prefs;
+uint8_t id_czujnika;
+uint8_t typ_zasilania;
 
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature czujniki(&oneWire);
@@ -92,7 +102,8 @@ uint8_t odczytajBaterie() {
 
 bool wyslijPomiar(float temp, bool blad, uint8_t bateria) {
     struct_message msg;
-    msg.id_czujnika = ID_CZUJNIKA;
+    msg.id_czujnika = id_czujnika;
+    msg.typ_zasilania = typ_zasilania;
     msg.temperatura = temp;
     msg.bateria_procent = bateria;
     msg.timestamp = millis() / 1000;
@@ -146,10 +157,21 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    // Preferences — ID i TYP przeżywają OTA
+    prefs.begin("satelita", false);
+    if (!prefs.isKey("id")) {
+        // Pierwszy flash — zapisz domyślne wartości
+        prefs.putUChar("id", DEFAULT_ID);
+        prefs.putUChar("typ", DEFAULT_TYP);
+        Serial.println("[Prefs] Pierwszy flash — zapisano ID i TYP");
+    }
+    id_czujnika = prefs.getUChar("id", DEFAULT_ID);
+    typ_zasilania = prefs.getUChar("typ", DEFAULT_TYP);
+
     Serial.println();
     Serial.println("================================");
-    Serial.println("  SATELITA — Smart Mleko v1.0");
-    Serial.printf("  ID czujnika: %d\n", ID_CZUJNIKA);
+    Serial.println("  SATELITA — Smart Mleko v2.0");
+    Serial.printf("  ID: %d  TYP: %s\n", id_czujnika, typ_zasilania == 1 ? "bateria" : "zasilacz");
     Serial.println("================================");
 
     // DS18B20

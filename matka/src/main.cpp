@@ -14,6 +14,10 @@
 #include <DNSServer.h>
 #include "secrets.h"
 
+// === Wersja ===
+
+#define FW_VERSION "4.1"
+
 // === WiFi ===
 
 #define AP_SSID "Smart_Mleko_Setup"
@@ -46,12 +50,12 @@ float prog_min = -99.0; // -99 = wyłączony; alarm gdy temp poniżej
 uint32_t interwal_s = 1800; // 30 min
 uint8_t cichy_od = 0;  // 0 = wyłączony
 uint8_t cichy_do = 0;
-unsigned long heartbeat_timeout = 7200000; // 2h w ms
 
 // === Struktury ESP-NOW ===
 
 typedef struct __attribute__((packed)) {
     uint8_t  id_czujnika;
+    uint8_t  typ_zasilania;   // 1 = bateria (deep sleep), 2 = zasilacz (always on)
     float    temperatura;
     uint8_t  bateria_procent;
     uint32_t timestamp;
@@ -66,41 +70,88 @@ typedef struct __attribute__((packed)) {
     char     ota_url[64];
 } struct_ack;
 
+// === Multi-Satellite ===
+
+#define MAX_SATELITY 8
+#define MAX_HISTORIA_PER 48  // 24h co 30min per satelita
+
+struct HistoriaWpis {
+    float temperatura;
+    uint32_t czas_unix;
+    bool pusty;
+};
+
+struct SatelitaInfo {
+    uint8_t id;
+    uint8_t typ;              // 1=bateria, 2=zasilacz
+    uint8_t mac[6];
+    struct_message pomiar;
+    unsigned long ostatni_czas; // millis() ostatniego odbioru
+    bool aktywna;
+    bool ota_pending;
+    // Historia per satelita
+    HistoriaWpis historia[MAX_HISTORIA_PER];
+    int hist_idx;
+    int hist_count;
+};
+
+SatelitaInfo satelity[MAX_SATELITY];
+int ile_satelit = 0;
+
 // === Zmienne globalne ===
 
-struct_message ostatni_pomiar;
-bool nowy_pomiar = false;
-bool mamy_dane = false;
-uint8_t adres_satelity[6];
-bool satelita_znana = false;
-unsigned long czas_ostatniego = 0;
 unsigned long boot_time = 0;
 String ip_adres = "";
+File ota_satelity_file;
 
 AsyncWebServer server(80);
 
-// === Historia (ring buffer 48h) ===
+// === Pomocnicze — satelity ===
 
-#define MAX_HISTORIA 96  // 48h co 30 min
-struct HistoriaWpis {
-    float temperatura;
-    uint32_t czas_unix;  // epoch
-    bool pusty;
-};
-HistoriaWpis historia[MAX_HISTORIA];
-int hist_idx = 0;
-int hist_count = 0;
+SatelitaInfo* znajdzSatelite(uint8_t id) {
+    for (int i = 0; i < ile_satelit; i++) {
+        if (satelity[i].id == id) return &satelity[i];
+    }
+    return nullptr;
+}
 
-void dodajDoHistorii(float temp) {
+SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac) {
+    SatelitaInfo *s = znajdzSatelite(id);
+    if (s) {
+        memcpy(s->mac, mac, 6);
+        if (typ > 0) s->typ = typ;
+        return s;
+    }
+    if (ile_satelit >= MAX_SATELITY) return nullptr;
+    s = &satelity[ile_satelit++];
+    memset(s, 0, sizeof(SatelitaInfo));
+    s->id = id;
+    s->typ = typ > 0 ? typ : 1;
+    memcpy(s->mac, mac, 6);
+    s->aktywna = true;
+    for (int i = 0; i < MAX_HISTORIA_PER; i++) s->historia[i].pusty = true;
+    Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+        id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return s;
+}
+
+String macToString(const uint8_t *mac) {
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}
+
+void dodajDoHistorii(SatelitaInfo *s, float temp) {
     struct tm info;
     if (!getLocalTime(&info)) return;
     time_t now;
     time(&now);
-    historia[hist_idx].temperatura = temp;
-    historia[hist_idx].czas_unix = (uint32_t)now;
-    historia[hist_idx].pusty = false;
-    hist_idx = (hist_idx + 1) % MAX_HISTORIA;
-    if (hist_count < MAX_HISTORIA) hist_count++;
+    s->historia[s->hist_idx].temperatura = temp;
+    s->historia[s->hist_idx].czas_unix = (uint32_t)now;
+    s->historia[s->hist_idx].pusty = false;
+    s->hist_idx = (s->hist_idx + 1) % MAX_HISTORIA_PER;
+    if (s->hist_count < MAX_HISTORIA_PER) s->hist_count++;
 }
 
 // === WiFi Credentials (LittleFS) ===
@@ -144,16 +195,37 @@ void usunWiFiCreds() {
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     if (len != sizeof(struct_message)) return;
 
-    memcpy(&ostatni_pomiar, data, sizeof(struct_message));
-    nowy_pomiar = true;
-    mamy_dane = true;
-    czas_ostatniego = millis();
+    struct_message msg;
+    memcpy(&msg, data, sizeof(struct_message));
 
-    memcpy(adres_satelity, mac, 6);
-    satelita_znana = true;
+    SatelitaInfo *s = znajdzLubDodajSatelite(msg.id_czujnika, msg.typ_zasilania, mac);
+    if (!s) {
+        Serial.println("[ESP-NOW] Brak miejsca na nowa satelite!");
+        return;
+    }
 
-    Serial.printf("[ESP-NOW] Odebrano od %02X:%02X:%02X:%02X:%02X:%02X\n",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    memcpy(&s->pomiar, &msg, sizeof(struct_message));
+    s->ostatni_czas = millis();
+    s->aktywna = true;
+
+    Serial.printf("[ESP-NOW] Satelita #%d od %s: %.1f°C bat=%d%%\n",
+        msg.id_czujnika, macToString(mac).c_str(),
+        msg.temperatura, msg.bateria_procent);
+
+    // Reset OTA po udanym update
+    if (s->ota_pending && !msg.blad_czujnika) {
+        s->ota_pending = false;
+        Serial.printf("[OTA] Satelita #%d zaktualizowana\n", s->id);
+        // Kasuj .bin dopiero gdy WSZYSTKIE satelity się zaktualizowały
+        bool ktos_czeka = false;
+        for (int i = 0; i < ile_satelit; i++) {
+            if (satelity[i].ota_pending) { ktos_czeka = true; break; }
+        }
+        if (!ktos_czeka) {
+            LittleFS.remove("/ota/satelita.bin");
+            Serial.println("[OTA] Wszystkie zaktualizowane — kasuje .bin");
+        }
+    }
 }
 
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
@@ -163,12 +235,10 @@ void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
 
 // === ACK ===
 
-void wyslijACK() {
-    if (!satelita_znana) return;
-
-    if (!esp_now_is_peer_exist(adres_satelity)) {
+void wyslijACK(SatelitaInfo *s) {
+    if (!esp_now_is_peer_exist(s->mac)) {
         esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, adres_satelity, 6);
+        memcpy(peer.peer_addr, s->mac, 6);
         peer.channel = 0;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
@@ -178,10 +248,15 @@ void wyslijACK() {
     ack.nowy_interwal_s = interwal_s;
     ack.godzina_start = 0;
     ack.godzina_stop = 0;
-    ack.ota_pending = false;
+    ack.ota_pending = s->ota_pending;
     memset(ack.ota_url, 0, sizeof(ack.ota_url));
+    if (s->ota_pending) {
+        String url = "http://" + ip_adres + "/ota/satelita.bin";
+        strlcpy(ack.ota_url, url.c_str(), sizeof(ack.ota_url));
+        Serial.printf("[ACK] OTA dla #%d: %s\n", s->id, ack.ota_url);
+    }
 
-    esp_now_send(adres_satelity, (uint8_t*)&ack, sizeof(ack));
+    esp_now_send(s->mac, (uint8_t*)&ack, sizeof(ack));
 }
 
 // === Czas ===
@@ -242,54 +317,59 @@ bool czyTrybCichy() {
     return h >= cichy_od || h < cichy_do; // np. 23-7
 }
 
-void sprawdzAlerty() {
-    if (!mamy_dane) return;
+void sprawdzAlerty(SatelitaInfo *s) {
     if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
 
+    String prefix = "Czujnik #" + String(s->id) + ": ";
     String msg = "";
     bool krytyczny = false;
 
-    if (ostatni_pomiar.blad_czujnika) {
-        msg = "⚠️ <b>Smart Mleko</b>\nBłąd czujnika temperatury!";
+    if (s->pomiar.blad_czujnika) {
+        msg = "⚠️ <b>Smart Mleko</b>\n" + prefix + "Błąd czujnika temperatury!";
         krytyczny = true;
-    } else if (ostatni_pomiar.temperatura > prog_max) {
-        msg = "🔴 <b>Smart Mleko</b>\nTemperatura za wysoka: <b>";
-        msg += String(ostatni_pomiar.temperatura, 1);
+    } else if (s->pomiar.temperatura > prog_max) {
+        msg = "🔴 <b>Smart Mleko</b>\n" + prefix + "Temperatura za wysoka: <b>";
+        msg += String(s->pomiar.temperatura, 1);
         msg += "°C</b> (próg: " + String(prog_max, 1) + "°C)";
         krytyczny = true;
-    } else if (prog_min > -50 && ostatni_pomiar.temperatura < prog_min) {
-        msg = "🔵 <b>Smart Mleko</b>\nTemperatura za niska: <b>";
-        msg += String(ostatni_pomiar.temperatura, 1);
+    } else if (prog_min > -50 && s->pomiar.temperatura < prog_min) {
+        msg = "🔵 <b>Smart Mleko</b>\n" + prefix + "Temperatura za niska: <b>";
+        msg += String(s->pomiar.temperatura, 1);
         msg += "°C</b> (próg: " + String(prog_min, 1) + "°C)";
         krytyczny = true;
-    } else if (ostatni_pomiar.bateria_procent <= 5) {
-        msg = "🔋 <b>Smart Mleko</b>\nBateria krytyczna: <b>";
-        msg += String(ostatni_pomiar.bateria_procent);
+    } else if (s->pomiar.bateria_procent <= 5 && s->typ == 1) {
+        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Bateria krytyczna: <b>";
+        msg += String(s->pomiar.bateria_procent);
         msg += "%</b>";
         krytyczny = true;
-    } else if (ostatni_pomiar.bateria_procent <= 15) {
-        msg = "🔋 <b>Smart Mleko</b>\nNiski poziom baterii: <b>";
-        msg += String(ostatni_pomiar.bateria_procent);
+    } else if (s->pomiar.bateria_procent <= 15 && s->typ == 1) {
+        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Niski poziom baterii: <b>";
+        msg += String(s->pomiar.bateria_procent);
         msg += "%</b>";
     }
 
     if (msg.length() > 0) {
-        if (!krytyczny && czyTrybCichy()) return; // łagodne blokowane w trybie cichym
+        if (!krytyczny && czyTrybCichy()) return;
         wyslijTelegram(msg);
         ostatni_telegram = millis();
     }
 }
 
 void sprawdzHeartbeat() {
-    if (!mamy_dane && millis() > heartbeat_timeout) {
-        // Nigdy nie dostaliśmy danych i minęło >2h od startu
-        if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
-        wyslijTelegram("📡 <b>Smart Mleko</b>\nBrak sygnału z Satelity od ponad 2h!");
-        ostatni_telegram = millis();
-    } else if (mamy_dane && (millis() - czas_ostatniego) > heartbeat_timeout) {
-        if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
-        wyslijTelegram("📡 <b>Smart Mleko</b>\nSatelita milczy od: " + czasOd(czas_ostatniego));
-        ostatni_telegram = millis();
+    for (int i = 0; i < ile_satelit; i++) {
+        SatelitaInfo *s = &satelity[i];
+        if (!s->aktywna) continue;
+
+        // Bateriowe: timeout = 3× interwał, zasilaczowe: 5 min
+        unsigned long timeout = (s->typ == 1) ? interwal_s * 3000UL : 300000UL;
+        if (timeout < 300000UL) timeout = 300000UL; // minimum 5 min
+
+        if ((millis() - s->ostatni_czas) > timeout) {
+            if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
+            wyslijTelegram("📡 <b>Smart Mleko</b>\nCzujnik #" + String(s->id) +
+                " milczy od: " + czasOd(s->ostatni_czas));
+            ostatni_telegram = millis();
+        }
     }
 }
 
@@ -323,19 +403,22 @@ void obsluzKomende(const String &tekst) {
 
     if (cmd == "/status") {
         String msg = "📊 <b>Smart Mleko — Status</b>\n";
-        if (!mamy_dane) {
-            msg += "Brak danych z Satelity";
-        } else if (ostatni_pomiar.blad_czujnika) {
-            msg += "Temperatura: <b>BŁĄD CZUJNIKA</b>\n";
-            msg += "Bateria: " + String(ostatni_pomiar.bateria_procent) + "%\n";
-            msg += "Ostatni pomiar: " + czasOd(czas_ostatniego);
+        if (ile_satelit == 0) {
+            msg += "Brak czujników";
         } else {
-            msg += "Temperatura: <b>" + String(ostatni_pomiar.temperatura, 1) + "°C</b>\n";
-            msg += "Bateria: " + String(ostatni_pomiar.bateria_procent) + "%\n";
-            msg += "Ostatni pomiar: " + czasOd(czas_ostatniego) + "\n";
-            if (prog_max < 50) msg += "Alarm górny: " + String(prog_max, 1) + "°C\n";
-            if (prog_min > -50) msg += "Alarm dolny: " + String(prog_min, 1) + "°C\n";
-            msg += "Interwał: " + String(interwal_s / 60) + " min";
+            for (int i = 0; i < ile_satelit; i++) {
+                SatelitaInfo *s = &satelity[i];
+                msg += "\n<b>Czujnik #" + String(s->id) + "</b>";
+                msg += (s->typ == 1) ? " 🔋" : " ⚡";
+                msg += "\n";
+                if (s->pomiar.blad_czujnika) {
+                    msg += "Temperatura: BŁĄD CZUJNIKA\n";
+                } else {
+                    msg += "Temperatura: <b>" + String(s->pomiar.temperatura, 1) + "°C</b>\n";
+                }
+                if (s->typ == 1) msg += "Bateria: " + String(s->pomiar.bateria_procent) + "%\n";
+                msg += "Ostatni pomiar: " + czasOd(s->ostatni_czas) + "\n";
+            }
         }
         unsigned long sek = millis() / 1000;
         msg += "\nUptime: " + String(sek / 3600) + "h " + String((sek % 3600) / 60) + "min";
@@ -423,10 +506,132 @@ void obsluzKomende(const String &tekst) {
         }
         msg += "⏱ Interwał pomiaru: " + String(interwal_s / 60) + " min\n";
         if (cichy_od == 0 && cichy_do == 0) {
-            msg += "🔕 Tryb cichy: wyłączony";
+            msg += "🔕 Tryb cichy: wyłączony\n";
         } else {
-            msg += "🔕 Tryb cichy: " + String(cichy_od) + ":00 — " + String(cichy_do) + ":00";
+            msg += "🔕 Tryb cichy: " + String(cichy_od) + ":00 — " + String(cichy_do) + ":00\n";
         }
+        msg += "\n<b>Czujniki:</b> " + String(ile_satelit) + " zarejestrowanych";
+        for (int i = 0; i < ile_satelit; i++) {
+            msg += "\n#" + String(satelity[i].id);
+            msg += (satelity[i].typ == 1) ? " 🔋 bateria" : " ⚡ zasilacz";
+        }
+        wyslijTelegram(msg);
+
+    } else if (cmd == "/historia") {
+        if (ile_satelit == 0) {
+            wyslijTelegram("📜 <b>Historia</b>\nBrak czujników.");
+        } else {
+            String msg = "📜 <b>Ostatnie pomiary</b>\n";
+            for (int si = 0; si < ile_satelit; si++) {
+                SatelitaInfo *s = &satelity[si];
+                msg += "\n<b>Czujnik #" + String(s->id) + "</b>\n";
+                if (s->hist_count == 0) {
+                    msg += "Brak danych\n";
+                    continue;
+                }
+                int ile = min(s->hist_count, 10);
+                for (int i = 0; i < ile; i++) {
+                    int idx = (s->hist_idx - 1 - i + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                    if (s->historia[idx].pusty) continue;
+                    struct tm info;
+                    time_t t = (time_t)s->historia[idx].czas_unix;
+                    localtime_r(&t, &info);
+                    char buf[6];
+                    strftime(buf, sizeof(buf), "%H:%M", &info);
+                    msg += String(buf) + " — <b>" + String(s->historia[idx].temperatura, 1) + "°C</b>\n";
+                }
+            }
+            wyslijTelegram(msg);
+        }
+
+    } else if (cmd == "/srednia") {
+        if (ile_satelit == 0) {
+            wyslijTelegram("📊 <b>Średnia 24h</b>\nBrak czujników.");
+        } else {
+            time_t now;
+            time(&now);
+            uint32_t granica = (uint32_t)now - 86400;
+            String msg = "📊 <b>Średnia 24h</b>\n";
+            for (int si = 0; si < ile_satelit; si++) {
+                SatelitaInfo *s = &satelity[si];
+                msg += "\n<b>Czujnik #" + String(s->id) + "</b>\n";
+                float suma = 0, tmin = 999, tmax = -999;
+                int n = 0;
+                for (int i = 0; i < s->hist_count; i++) {
+                    int idx = (s->hist_idx - 1 - i + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                    if (s->historia[idx].pusty || s->historia[idx].czas_unix < granica) continue;
+                    float t = s->historia[idx].temperatura;
+                    suma += t;
+                    if (t < tmin) tmin = t;
+                    if (t > tmax) tmax = t;
+                    n++;
+                }
+                if (n == 0) {
+                    msg += "Brak danych\n";
+                } else {
+                    msg += "Średnia: <b>" + String(suma / n, 1) + "°C</b>\n";
+                    msg += "Min: " + String(tmin, 1) + "°C, Max: " + String(tmax, 1) + "°C\n";
+                    msg += "Pomiarów: " + String(n) + "\n";
+                }
+            }
+            wyslijTelegram(msg);
+        }
+
+    } else if (cmd == "/raport") {
+        String msg = "📋 <b>Smart Mleko — Raport</b>\n";
+
+        // Czujniki
+        if (ile_satelit == 0) {
+            msg += "\nBrak czujników\n";
+        } else {
+            time_t now;
+            time(&now);
+            uint32_t granica = (uint32_t)now - 86400;
+            for (int si = 0; si < ile_satelit; si++) {
+                SatelitaInfo *s = &satelity[si];
+                msg += "\n<b>Czujnik #" + String(s->id) + "</b>";
+                msg += (s->typ == 1) ? " 🔋\n" : " ⚡\n";
+                if (s->pomiar.blad_czujnika) {
+                    msg += "Temperatura: BŁĄD\n";
+                } else {
+                    msg += "Temperatura: <b>" + String(s->pomiar.temperatura, 1) + "°C</b>\n";
+                }
+                if (s->typ == 1) msg += "Bateria: " + String(s->pomiar.bateria_procent) + "%\n";
+                msg += "Ostatni: " + czasOd(s->ostatni_czas) + "\n";
+
+                // Średnia 24h
+                float suma = 0, tmin = 999, tmax = -999;
+                int n = 0;
+                for (int i = 0; i < s->hist_count; i++) {
+                    int idx = (s->hist_idx - 1 - i + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                    if (s->historia[idx].pusty || s->historia[idx].czas_unix < granica) continue;
+                    float t = s->historia[idx].temperatura;
+                    suma += t;
+                    if (t < tmin) tmin = t;
+                    if (t > tmax) tmax = t;
+                    n++;
+                }
+                if (n > 0) {
+                    msg += "24h: śr=" + String(suma / n, 1) + "°C (min:" + String(tmin, 1) + " max:" + String(tmax, 1) + ")\n";
+                }
+            }
+        }
+
+        // Ustawienia
+        msg += "\n<b>Ustawienia:</b>\n";
+        msg += "Alarm górny: " + String(prog_max < 50 ? String(prog_max, 1) + "°C" : "wył") + "\n";
+        msg += "Alarm dolny: " + String(prog_min > -50 ? String(prog_min, 1) + "°C" : "wył") + "\n";
+        msg += "Interwał: " + String(interwal_s / 60) + " min\n";
+        if (cichy_od != 0 || cichy_do != 0) {
+            msg += "Tryb cichy: " + String(cichy_od) + ":00—" + String(cichy_do) + ":00\n";
+        }
+
+        // System
+        unsigned long sek = millis() / 1000;
+        msg += "\n<b>System:</b>\n";
+        msg += "Uptime: " + String(sek / 3600) + "h " + String((sek % 3600) / 60) + "min\n";
+        msg += "IP: " + ip_adres + "\n";
+        msg += "Czujniki: " + String(ile_satelit);
         wyslijTelegram(msg);
 
     } else if (cmd == "/wifi-reset") {
@@ -440,6 +645,9 @@ void obsluzKomende(const String &tekst) {
         String msg = "📋 <b>Komendy Smart Mleko</b>\n\n";
         msg += "<b>Podgląd:</b>\n";
         msg += "/status — temperatura, bateria, stan\n";
+        msg += "/historia — ostatnie 10 pomiarów\n";
+        msg += "/srednia — średnia, min, max z 24h\n";
+        msg += "/raport — pełny raport\n";
         msg += "/ustawienia — aktualne ustawienia\n\n";
         msg += "<b>Alarmy:</b>\n";
         msg += "/set_max 8 — alarm gdy temp powyżej (°C)\n";
@@ -622,40 +830,16 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 .cfg-msg{text-align:center;font-size:0.85em;margin-top:10px;min-height:1.2em}
 .cfg-check{display:flex;align-items:center;gap:8px}
 .cfg-check input[type=checkbox]{width:18px;height:18px;accent-color:#16a34a}
+.sat-type{font-size:0.7em;color:#64748b;margin-left:6px}
 </style>
 </head>
 <body>
 <div class="header">
-<h1>Smart Mleko v3.0</h1>
+<h1>Smart Mleko <span id="ver"></span></h1>
 <div class="status" id="czas">---</div>
 </div>
 
-<div class="card">
-<h2>Czujnik mleka</h2>
-<div style="text-align:center;margin-bottom:12px">
-<span class="status-badge status-wait" id="statusBadge">Ladowanie...</span>
-</div>
-<div class="temp-display">
-<span class="temp-value" id="temp">--</span>
-<span class="temp-unit">&deg;C</span>
-</div>
-<div class="info-grid">
-<div class="info-item">
-<div class="info-label">Bateria</div>
-<div class="info-value" id="bat">--%</div>
-</div>
-<div class="info-item">
-<div class="info-label">Ostatni pomiar</div>
-<div class="info-value" id="ago">---</div>
-</div>
-</div>
-</div>
-
-<div class="card">
-<h2>Historia temperatury</h2>
-<div id="chartInfo" style="font-size:0.8em;color:#64748b;margin-bottom:8px">Ladowanie...</div>
-<canvas id="chart" height="200" style="width:100%;background:#0f172a;border-radius:10px"></canvas>
-</div>
+<div id="czujniki"></div>
 
 <div class="card">
 <h2>System</h2>
@@ -664,7 +848,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div>IP: <strong id="ip">---</strong></div>
 <div>Uptime: <strong id="uptime">---</strong></div>
 <div>NTP: <strong id="ntp">---</strong></div>
-<div>Satelita: <strong id="sat">---</strong></div>
+<div>Czujniki: <strong id="satCount">0</strong></div>
 </div>
 </div>
 
@@ -694,7 +878,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 </div>
 
 <div class="card">
-<h2>Aktualizacja OTA</h2>
+<h2>Aktualizacja OTA — Matka</h2>
 <div style="margin-bottom:12px">
 <label style="font-size:0.85em;color:#94a3b8">Firmware Matki (.bin):</label>
 <input type="file" id="otaFile" accept=".bin" style="margin-top:8px;color:#e2e8f0;font-size:0.85em">
@@ -706,50 +890,118 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 </div>
 </div>
 
+<div class="card">
+<h2>Aktualizacja OTA — Satelita</h2>
+<div style="margin-bottom:4px;font-size:0.8em;color:#64748b">Jeden firmware dla wszystkich satelitow (ID i typ w Preferences)</div>
+<div style="margin-bottom:12px">
+<label style="font-size:0.85em;color:#94a3b8">Firmware Satelity (.bin):</label>
+<input type="file" id="otaSatFile" accept=".bin" style="margin-top:8px;color:#e2e8f0;font-size:0.85em">
+</div>
+<button onclick="uploadOTASat()" id="otaSatBtn" style="background:#7c3aed;color:white;border:none;padding:12px 24px;border-radius:10px;font-size:1em;cursor:pointer;width:100%">Wgraj firmware Satelity</button>
+<div id="otaSatStatus" style="margin-top:12px;font-size:0.85em;color:#94a3b8;text-align:center"></div>
+<div style="background:#0f172a;border-radius:8px;height:8px;margin-top:8px;display:none" id="otaSatBarWrap">
+<div id="otaSatBar" style="background:#7c3aed;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
+</div>
+</div>
+
 <div class="refresh-note">Odswiezanie co 5 sekund</div>
 
 <script>
+function renderCzujniki(satelity){
+let c=document.getElementById('czujniki');
+if(!satelity||!satelity.length){
+c.innerHTML='<div class="card"><h2>Czujniki</h2><div style="text-align:center;color:#64748b;padding:20px">Brak polaczonych czujnikow.<br>Podlacz Satelite — pojawi sie automatycznie.</div></div>';
+return;
+}
+let html='';
+satelity.forEach(function(s){
+let typIcon=s.typ===1?'&#x1F50B;':'&#x26A1;';
+let typName=s.typ===1?'bateria':'zasilacz';
+let tempVal='--',tempClass='temp-value',badgeText='Czekam',badgeCls='status-badge status-wait';
+let trendHtml='';
+if(s.blad_czujnika){tempVal='ERR';tempClass='temp-value blad';badgeText='Blad czujnika!';badgeCls='status-badge status-err';}
+else if(s.temperatura!==undefined){tempVal=s.temperatura.toFixed(1);badgeText='OK';badgeCls='status-badge status-ok';}
+if(s.trend!==undefined&&s.trend!==null){
+let arrow,cls;
+if(s.trend>0.1){arrow='\u2191';cls='color:#ef4444'}
+else if(s.trend<-0.1){arrow='\u2193';cls='color:#22c55e'}
+else{arrow='\u2192';cls='color:#94a3b8'}
+let sign=s.trend>=0?'+':'';
+trendHtml='<div style="font-size:1.2em;margin-top:8px"><span style="'+cls+'">'+arrow+' '+sign+s.trend.toFixed(1)+'\u00b0C/h</span></div>';
+}
+html+='<div class="card"><h2>Czujnik #'+s.id+' <span class="sat-type">'+typIcon+' '+typName+'</span></h2>';
+html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
+html+='<div class="temp-display"><span class="'+tempClass+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
+html+='<div class="info-grid">';
+if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';}
+else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#22c55e">Sieciowe</div></div>';}
+html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value">'+s.ostatni+'</div></div>';
+html+='</div>';
+html+='<canvas id="chart_'+s.id+'" height="150" style="width:100%;margin-top:16px;background:#0f172a;border-radius:10px"></canvas>';
+html+='</div>';
+});
+c.innerHTML=html;
+// Rysuj wykresy
+loadCharts();
+}
+
+function loadCharts(){
+fetch('/api/historia').then(r=>r.json()).then(arr=>{
+arr.forEach(function(sat){
+let cv=document.getElementById('chart_'+sat.id);
+if(!cv||!sat.dane||sat.dane.length<2)return;
+let ctx=cv.getContext('2d');
+let w=cv.width=cv.offsetWidth;
+let h=cv.height=150;
+let d=sat.dane;
+let vmin=999,vmax=-999;
+d.forEach(function(p){if(p.v<vmin)vmin=p.v;if(p.v>vmax)vmax=p.v});
+let pad=0.5;vmin-=pad;vmax+=pad;
+if(vmax-vmin<1){vmin-=0.5;vmax+=0.5}
+let tmin=d[0].t,tmax=d[d.length-1].t;
+if(tmax===tmin)tmax=tmin+1;
+ctx.clearRect(0,0,w,h);
+// Siatka
+ctx.strokeStyle='#1e293b';ctx.lineWidth=1;
+for(let i=0;i<=4;i++){
+let y=h-((i/4)*(h-30))-15;
+ctx.beginPath();ctx.moveTo(40,y);ctx.lineTo(w-10,y);ctx.stroke();
+let val=vmin+((i/4)*(vmax-vmin));
+ctx.fillStyle='#64748b';ctx.font='11px sans-serif';ctx.textAlign='right';
+ctx.fillText(val.toFixed(1),36,y+4);
+}
+// Linia
+ctx.strokeStyle='#38bdf8';ctx.lineWidth=2;
+ctx.beginPath();
+d.forEach(function(p,i){
+let x=40+((p.t-tmin)/(tmax-tmin))*(w-50);
+let y=h-15-((p.v-vmin)/(vmax-vmin))*(h-30);
+if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+});
+ctx.stroke();
+// Oś czasu
+ctx.fillStyle='#64748b';ctx.font='10px sans-serif';ctx.textAlign='center';
+[0,0.25,0.5,0.75,1].forEach(function(f){
+let t=tmin+f*(tmax-tmin);
+let date=new Date(t*1000);
+let lbl=('0'+date.getHours()).slice(-2)+':'+('0'+date.getMinutes()).slice(-2);
+let x=40+f*(w-50);
+ctx.fillText(lbl,x,h-2);
+});
+});
+}).catch(()=>{});
+}
+
 function update(){
 fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('czas').textContent=d.czas_ntp;
+document.getElementById('ver').textContent='v'+d.wersja;
 document.getElementById('mac').textContent=d.mac;
 document.getElementById('ip').textContent=d.ip;
 document.getElementById('uptime').textContent=d.uptime;
 document.getElementById('ntp').textContent=d.czas_ntp;
-
-let el=document.getElementById('temp');
-let badge=document.getElementById('statusBadge');
-
-if(!d.mamy_dane){
-el.textContent='--';
-el.className='temp-value';
-badge.textContent='Czekam na Satelite';
-badge.className='status-badge status-wait';
-document.getElementById('bat').textContent='--%';
-document.getElementById('ago').textContent='---';
-document.getElementById('sat').textContent='nie polaczona';
-}else if(d.blad_czujnika){
-el.textContent='ERR';
-el.className='temp-value blad';
-badge.textContent='Blad czujnika!';
-badge.className='status-badge status-err';
-document.getElementById('bat').textContent=d.bateria+'%';
-document.getElementById('ago').textContent=d.ostatni_pomiar_temu;
-document.getElementById('sat').textContent=d.mac_satelity;
-}else{
-el.textContent=d.temperatura.toFixed(1);
-el.className='temp-value';
-badge.textContent='OK';
-badge.className='status-badge status-ok';
-document.getElementById('bat').textContent=d.bateria+'%';
-document.getElementById('ago').textContent=d.ostatni_pomiar_temu;
-document.getElementById('sat').textContent=d.mac_satelity;
-
-let b=document.getElementById('bat');
-if(d.bateria>15)b.className='info-value bat-ok';
-else if(d.bateria>5)b.className='info-value bat-mid';
-else b.className='info-value bat-low';
-}
+document.getElementById('satCount').textContent=d.satelity?d.satelity.length:'0';
+renderCzujniki(d.satelity);
 }).catch(e=>console.log(e));
 }
 update();
@@ -785,6 +1037,36 @@ let fd=new FormData();fd.append('firmware',f);
 xhr.send(fd);
 }
 
+function uploadOTASat(){
+let f=document.getElementById('otaSatFile').files[0];
+if(!f){document.getElementById('otaSatStatus').textContent='Wybierz plik .bin!';return}
+let btn=document.getElementById('otaSatBtn');
+btn.disabled=true;btn.textContent='Wgrywanie...';
+document.getElementById('otaSatBarWrap').style.display='block';
+let xhr=new XMLHttpRequest();
+xhr.open('POST','/ota/satelita');
+xhr.upload.onprogress=function(e){
+if(e.lengthComputable){
+let p=Math.round(e.loaded/e.total*100);
+document.getElementById('otaSatBar').style.width=p+'%';
+document.getElementById('otaSatStatus').textContent=p+'%';
+}};
+xhr.onload=function(){
+if(xhr.responseText==='OK'){
+document.getElementById('otaSatStatus').textContent='Zapisano! Wszystkie satelity pobiorza przy nastepnym budzeniu.';
+}else{
+document.getElementById('otaSatStatus').textContent='BLAD: '+xhr.responseText;
+}
+btn.disabled=false;btn.textContent='Wgraj firmware Satelity';
+};
+xhr.onerror=function(){
+document.getElementById('otaSatStatus').textContent='Blad polaczenia';
+btn.disabled=false;btn.textContent='Wgraj firmware Satelity';
+};
+let fd=new FormData();fd.append('firmware',f);
+xhr.send(fd);
+}
+
 // === Ustawienia ===
 (function(){
 let s=document.getElementById('cfgCOd');
@@ -796,17 +1078,9 @@ let o2=document.createElement('option');o2.value=i;o2.textContent=i+':00';
 e.appendChild(o2);
 }})();
 
-function toggleMax(){
-document.getElementById('cfgMax').disabled=!document.getElementById('maxOn').checked;
-}
-function toggleMin(){
-document.getElementById('cfgMin').disabled=!document.getElementById('minOn').checked;
-}
-function toggleCichy(){
-let on=document.getElementById('cichyOn').checked;
-document.getElementById('cfgCOd').disabled=!on;
-document.getElementById('cfgCDo').disabled=!on;
-}
+function toggleMax(){document.getElementById('cfgMax').disabled=!document.getElementById('maxOn').checked}
+function toggleMin(){document.getElementById('cfgMin').disabled=!document.getElementById('minOn').checked}
+function toggleCichy(){let on=document.getElementById('cichyOn').checked;document.getElementById('cfgCOd').disabled=!on;document.getElementById('cfgCDo').disabled=!on}
 
 function loadConfig(){
 fetch('/api/ustawienia').then(r=>r.json()).then(d=>{
@@ -814,83 +1088,23 @@ let maxOn=d.prog_max<50;
 document.getElementById('maxOn').checked=maxOn;
 document.getElementById('cfgMax').value=maxOn?d.prog_max:8;
 document.getElementById('cfgMax').disabled=!maxOn;
-
 let minOn=d.prog_min>-50;
 document.getElementById('minOn').checked=minOn;
 document.getElementById('cfgMin').value=minOn?d.prog_min:0;
 document.getElementById('cfgMin').disabled=!minOn;
-
 document.getElementById('cfgInt').value=d.interwal_min;
-
-let cOn=!(d.cichy_od==0&&d.cichy_do==0);
+let cOn=d.cichy_od!==0||d.cichy_do!==0;
 document.getElementById('cichyOn').checked=cOn;
 document.getElementById('cfgCOd').value=d.cichy_od;
 document.getElementById('cfgCDo').value=d.cichy_do;
 document.getElementById('cfgCOd').disabled=!cOn;
 document.getElementById('cfgCDo').disabled=!cOn;
-});
-}
+})}
 loadConfig();
-
-function drawChart(){
-fetch('/api/historia').then(r=>r.json()).then(data=>{
-let info=document.getElementById('chartInfo');
-if(!data.length){info.textContent='Brak danych';return}
-info.textContent=data.length+' pomiarow';
-let c=document.getElementById('chart');
-let ctx=c.getContext('2d');
-c.width=c.offsetWidth*2;c.height=400;
-ctx.clearRect(0,0,c.width,c.height);
-let vals=data.map(d=>d.v);
-let minV=Math.floor(Math.min(...vals)-1);
-let maxV=Math.ceil(Math.max(...vals)+1);
-if(maxV-minV<4){minV-=2;maxV+=2}
-let pad={l:50,r:20,t:20,b:40};
-let w=c.width-pad.l-pad.r;
-let h=c.height-pad.t-pad.b;
-// siatka
-ctx.strokeStyle='#1e293b';ctx.lineWidth=1;
-ctx.fillStyle='#64748b';ctx.font='20px sans-serif';
-for(let v=minV;v<=maxV;v++){
-let y=pad.t+h-(v-minV)/(maxV-minV)*h;
-ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(pad.l+w,y);ctx.stroke();
-ctx.fillText(v+'°',4,y+6);
-}
-// oś czasu
-let t0=data[0].t;let t1=data[data.length-1].t;
-let span=t1-t0;
-if(span>0){
-let step=span>7200?3600:1800;
-for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step){
-let x=pad.l+(t-t0)/span*w;
-ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,pad.t+h);ctx.stroke();
-let d=new Date(t*1000);
-ctx.fillText(d.getHours()+':'+(d.getMinutes()<10?'0':'')+d.getMinutes(),x-15,c.height-10);
-}}
-// linia
-ctx.strokeStyle='#22c55e';ctx.lineWidth=3;
-ctx.beginPath();
-for(let i=0;i<data.length;i++){
-let x=pad.l+(span>0?(data[i].t-t0)/span:0.5)*w;
-let y=pad.t+h-(data[i].v-minV)/(maxV-minV)*h;
-if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
-}
-ctx.stroke();
-// kropki
-ctx.fillStyle='#22c55e';
-for(let i=0;i<data.length;i++){
-let x=pad.l+(span>0?(data[i].t-t0)/span:0.5)*w;
-let y=pad.t+h-(data[i].v-minV)/(maxV-minV)*h;
-ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
-}
-});
-}
-drawChart();
-setInterval(drawChart,30000);
 
 function saveConfig(){
 let btn=document.getElementById('cfgBtn');
-btn.disabled=true;btn.textContent='Zapisywanie...';
+btn.disabled=true;btn.textContent='Zapisuje...';
 let body={
 prog_max:document.getElementById('maxOn').checked?parseFloat(document.getElementById('cfgMax').value):99,
 prog_min:document.getElementById('minOn').checked?parseFloat(document.getElementById('cfgMin').value):-99,
@@ -899,20 +1113,18 @@ cichy_od:document.getElementById('cichyOn').checked?parseInt(document.getElement
 cichy_do:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCDo').value):0
 };
 fetch('/api/ustawienia',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-.then(r=>r.text()).then(t=>{
-document.getElementById('cfgMsg').textContent=t==='OK'?'Zapisano!':'Blad: '+t;
-document.getElementById('cfgMsg').style.color=t==='OK'?'#4ade80':'#fca5a5';
+.then(r=>{
+document.getElementById('cfgMsg').textContent=r.ok?'Zapisano!':'Blad';
+document.getElementById('cfgMsg').style.color=r.ok?'#4ade80':'#fca5a5';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
 setTimeout(()=>{document.getElementById('cfgMsg').textContent=''},3000);
 }).catch(()=>{
 document.getElementById('cfgMsg').textContent='Blad polaczenia';
 document.getElementById('cfgMsg').style.color='#fca5a5';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
-});
-}
+})}
 </script>
-</body>
-</html>
+</body></html>
 )rawliteral";
 
 // === AP Mode Server ===
@@ -921,24 +1133,11 @@ void setupAPServer() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
         req->send_P(200, "text/html", AP_PAGE);
     });
-    server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-        req->send_P(200, "text/html", AP_PAGE);
-    });
-    // Captive portal detection
-    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *req) {
-        req->send_P(200, "text/html", AP_PAGE);
-    });
-    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *req) {
-        req->send_P(200, "text/html", AP_PAGE);
-    });
-    server.on("/fwlink", HTTP_GET, [](AsyncWebServerRequest *req) {
-        req->send_P(200, "text/html", AP_PAGE);
-    });
 
     server.on("/api/sys", HTTP_GET, [](AsyncWebServerRequest *req) {
         JsonDocument doc;
-        doc["heap"] = ESP.getFreeHeap();
         doc["mac"] = WiFi.macAddress();
+        doc["heap"] = ESP.getFreeHeap();
         String json;
         serializeJson(doc, json);
         req->send(200, "application/json", json);
@@ -1029,25 +1228,39 @@ void setupServer() {
 
         doc["mac"] = WiFi.macAddress();
         doc["ip"] = ip_adres;
+        doc["wersja"] = FW_VERSION;
         doc["czas_ntp"] = pobierzCzas();
-        doc["mamy_dane"] = mamy_dane;
 
         // Uptime
         unsigned long sek = millis() / 1000;
         String up = String(sek / 3600) + "h " + String((sek % 3600) / 60) + "min";
         doc["uptime"] = up;
 
-        if (mamy_dane) {
-            doc["temperatura"] = ostatni_pomiar.temperatura;
-            doc["bateria"] = ostatni_pomiar.bateria_procent;
-            doc["blad_czujnika"] = ostatni_pomiar.blad_czujnika;
-            doc["ostatni_pomiar_temu"] = czasOd(czas_ostatniego);
+        // Satelity
+        JsonArray arr = doc["satelity"].to<JsonArray>();
+        for (int i = 0; i < ile_satelit; i++) {
+            SatelitaInfo *s = &satelity[i];
+            JsonObject o = arr.add<JsonObject>();
+            o["id"] = s->id;
+            o["typ"] = s->typ;
+            o["mac"] = macToString(s->mac);
+            o["temperatura"] = s->pomiar.temperatura;
+            o["bateria"] = s->pomiar.bateria_procent;
+            o["blad_czujnika"] = s->pomiar.blad_czujnika;
+            o["ostatni"] = czasOd(s->ostatni_czas);
 
-            char macbuf[18];
-            snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X",
-                adres_satelity[0], adres_satelity[1], adres_satelity[2],
-                adres_satelity[3], adres_satelity[4], adres_satelity[5]);
-            doc["mac_satelity"] = macbuf;
+            // Trend °C/h z historii
+            if (s->hist_count >= 2) {
+                int last_idx = (s->hist_idx - 1 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                int prev_idx = (s->hist_idx - 2 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                if (!s->historia[last_idx].pusty && !s->historia[prev_idx].pusty) {
+                    float dt = (float)(s->historia[last_idx].czas_unix - s->historia[prev_idx].czas_unix) / 3600.0f;
+                    if (dt > 0) {
+                        float rate = (s->historia[last_idx].temperatura - s->historia[prev_idx].temperatura) / dt;
+                        o["trend"] = round(rate * 10.0f) / 10.0f;
+                    }
+                }
+            }
         }
 
         String json;
@@ -1055,16 +1268,34 @@ void setupServer() {
         req->send(200, "application/json", json);
     });
 
-    // Historia
+    // Historia — per satelita via ?id=X, lub wszystkie
     server.on("/api/historia", HTTP_GET, [](AsyncWebServerRequest *req) {
-        String json = "[";
-        for (int i = 0; i < hist_count; i++) {
-            int idx = (hist_idx - hist_count + i + MAX_HISTORIA) % MAX_HISTORIA;
-            if (i > 0) json += ",";
-            json += "{\"t\":" + String(historia[idx].czas_unix) +
-                    ",\"v\":" + String(historia[idx].temperatura, 1) + "}";
+        int targetId = -1;
+        if (req->hasParam("id")) {
+            targetId = req->getParam("id")->value().toInt();
         }
-        json += "]";
+
+        JsonDocument doc;
+        JsonArray root = doc.to<JsonArray>();
+
+        for (int si = 0; si < ile_satelit; si++) {
+            SatelitaInfo *s = &satelity[si];
+            if (targetId >= 0 && s->id != targetId) continue;
+
+            JsonObject sat = root.add<JsonObject>();
+            sat["id"] = s->id;
+            JsonArray hist = sat["dane"].to<JsonArray>();
+            for (int i = 0; i < s->hist_count; i++) {
+                int idx = (s->hist_idx - s->hist_count + i + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+                if (s->historia[idx].pusty) continue;
+                JsonObject entry = hist.add<JsonObject>();
+                entry["t"] = s->historia[idx].czas_unix;
+                entry["v"] = round(s->historia[idx].temperatura * 10.0f) / 10.0f;
+            }
+        }
+
+        String json;
+        serializeJson(doc, json);
         req->send(200, "application/json", json);
     });
 
@@ -1145,21 +1376,66 @@ void setupServer() {
         }
     );
 
+    // OTA Satelity — zapis .bin do LittleFS
+    server.on("/ota/satelita", HTTP_POST,
+        [](AsyncWebServerRequest *req) {
+            bool ok = LittleFS.exists("/ota/satelita.bin");
+            req->send(200, "text/plain", ok ? "OK" : "BLAD");
+            if (ok) {
+                // Ustaw OTA pending dla wszystkich satelitów
+                for (int i = 0; i < ile_satelit; i++) {
+                    satelity[i].ota_pending = true;
+                }
+                Serial.printf("[OTA-SAT] Flaga ustawiona dla %d satelitow\n", ile_satelit);
+            }
+        },
+        [](AsyncWebServerRequest *req, const String &filename, size_t index,
+           uint8_t *data, size_t len, bool final) {
+            if (!index) {
+                Serial.printf("[OTA-SAT] Start: %s\n", filename.c_str());
+                LittleFS.mkdir("/ota");
+                ota_satelity_file = LittleFS.open("/ota/satelita.bin", "w");
+                if (!ota_satelity_file) {
+                    Serial.println("[OTA-SAT] BLAD otwarcia pliku!");
+                    return;
+                }
+            }
+            if (ota_satelity_file) {
+                ota_satelity_file.write(data, len);
+            }
+            if (final) {
+                if (ota_satelity_file) {
+                    ota_satelity_file.close();
+                    Serial.printf("[OTA-SAT] Zapisano: %u bajtow\n", index + len);
+                }
+            }
+        }
+    );
+
+    // Serwowanie .bin dla Satelity
+    server.on("/ota/satelita.bin", HTTP_GET, [](AsyncWebServerRequest *req) {
+        if (!LittleFS.exists("/ota/satelita.bin")) {
+            req->send(404, "text/plain", "Brak pliku");
+            return;
+        }
+        req->send(LittleFS, "/ota/satelita.bin", "application/octet-stream");
+    });
+
     server.begin();
     Serial.println("[OK] Serwer WWW aktywny");
 }
 
 // === Wyświetlanie pomiaru ===
 
-void wyswietlPomiar() {
+void wyswietlPomiar(SatelitaInfo *s) {
     Serial.println("========================================");
-    Serial.printf("  Czujnik ID:    %d\n", ostatni_pomiar.id_czujnika);
-    if (ostatni_pomiar.blad_czujnika) {
+    Serial.printf("  Czujnik #%d (%s)\n", s->id, s->typ == 1 ? "bateria" : "zasilacz");
+    if (s->pomiar.blad_czujnika) {
         Serial.println("  Temperatura:   BLAD CZUJNIKA!");
     } else {
-        Serial.printf("  Temperatura:   %.2f C\n", ostatni_pomiar.temperatura);
+        Serial.printf("  Temperatura:   %.2f C\n", s->pomiar.temperatura);
     }
-    Serial.printf("  Bateria:       %d%%\n", ostatni_pomiar.bateria_procent);
+    if (s->typ == 1) Serial.printf("  Bateria:       %d%%\n", s->pomiar.bateria_procent);
     Serial.println("========================================");
 }
 
@@ -1201,7 +1477,7 @@ void setup() {
 
     Serial.println();
     Serial.println("================================");
-    Serial.println("  MATKA — Smart Mleko v3.0");
+    Serial.printf("  MATKA — Smart Mleko v%s\n", FW_VERSION);
     Serial.println("================================");
 
     // LittleFS
@@ -1274,12 +1550,12 @@ void setup() {
     setupServer();
 
     // Telegram — wiadomość startowa
-    wyslijTelegram("✅ <b>Smart Mleko v3.0</b>\nMatka uruchomiona\nIP: " + ip_adres);
+    wyslijTelegram("✅ <b>Smart Mleko v" FW_VERSION "</b>\nMatka uruchomiona\nIP: " + ip_adres);
 
     Serial.println();
     Serial.println(">>> Dashboard: http://mleko.local");
     Serial.printf(">>> Lub: http://%s\n", ip_adres.c_str());
-    Serial.println(">>> Czekam na dane z Satelity...");
+    Serial.println(">>> Czekam na dane z Satelitow...");
     Serial.println();
 }
 
@@ -1297,15 +1573,43 @@ void loop() {
         return;
     }
 
-    if (nowy_pomiar) {
-        nowy_pomiar = false;
-        wyswietlPomiar();
-        wyslijACK();
-        sprawdzAlerty();
-        if (!ostatni_pomiar.blad_czujnika) {
-            dodajDoHistorii(ostatni_pomiar.temperatura);
+    // Auto-reconnect WiFi — restart jeśli brak połączenia >60s
+    static unsigned long wifi_utracone = 0;
+    if (WiFi.status() != WL_CONNECTED) {
+        if (wifi_utracone == 0) {
+            wifi_utracone = millis();
+            Serial.println("[WiFi] Polaczenie utracone!");
+        } else if (millis() - wifi_utracone > 60000) {
+            Serial.println("[WiFi] Brak WiFi >60s — restart");
+            ESP.restart();
+        }
+    } else {
+        wifi_utracone = 0;
+    }
+
+    // Przetwarzanie nowych pomiarów
+    static unsigned long ostatnie_sprawdzenie = 0;
+    if (millis() - ostatnie_sprawdzenie > 1000) {
+        ostatnie_sprawdzenie = millis();
+        for (int i = 0; i < ile_satelit; i++) {
+            SatelitaInfo *s = &satelity[i];
+            // Jeśli pomiar jest świeży (< 2s temu) i jeszcze nie przetworzony
+            if (s->ostatni_czas > 0 && (millis() - s->ostatni_czas) < 2000) {
+                // Sprawdź czy ten pomiar był już przetworzony
+                static unsigned long przetworzone[MAX_SATELITY] = {0};
+                if (przetworzone[i] != s->ostatni_czas) {
+                    przetworzone[i] = s->ostatni_czas;
+                    wyswietlPomiar(s);
+                    wyslijACK(s);
+                    sprawdzAlerty(s);
+                    if (!s->pomiar.blad_czujnika) {
+                        dodajDoHistorii(s, s->pomiar.temperatura);
+                    }
+                }
+            }
         }
     }
+
     sprawdzTelegram();
     sprawdzHeartbeat();
     delay(10);
