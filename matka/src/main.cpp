@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "4.7"
+#define FW_VERSION "4.8"
 
 // === WiFi ===
 
@@ -156,6 +156,20 @@ SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac
     Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
         id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return s;
+}
+
+void usunSatelite(uint8_t id) {
+    for (int i = 0; i < ile_satelit; i++) {
+        if (satelity[i].id == id) {
+            esp_now_del_peer(satelity[i].mac);
+            for (int j = i; j < ile_satelit - 1; j++) {
+                satelity[j] = satelity[j+1];
+            }
+            ile_satelit--;
+            Serial.printf("[SAT] Satelita #%d usunieta\n", id);
+            return;
+        }
+    }
 }
 
 String macToString(const uint8_t *mac) {
@@ -1095,7 +1109,10 @@ html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div c
 html+='</div>';
 let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty aktywne';
 let monStyle=s.tylko_monitoring?'background:#334155;color:#94a3b8':'background:#166534;color:#4ade80';
-html+='<div style="text-align:center;margin-top:10px"><button style="'+monStyle+';border:none;padding:5px 14px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button></div>';
+html+='<div style="text-align:center;margin-top:10px">';
+html+='<button style="'+monStyle+';border:none;padding:5px 14px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button>';
+html+=' <button style="background:#7f1d1d;color:#fca5a5;border:none;padding:5px 12px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="usunSatelite('+s.id+',\''+nazwaDisplay+'\')">&#x2715; Usun</button>';
+html+='</div>';
 html+='<canvas id="chart_'+s.id+'" height="150" style="width:100%;margin-top:16px;background:#0f172a;border-radius:10px"></canvas>';
 html+='</div>';
 });
@@ -1176,6 +1193,11 @@ if(aktualna==='Czujnik #'+id)aktualna='';
 var nowa=prompt('Nazwa czujnika #'+id+':',aktualna);
 if(nowa===null)return;
 fetch('/api/satelita/nazwa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,nazwa:nowa.trim()})})
+.then(r=>r.json()).then(d=>{if(d.ok)update();});
+}
+function usunSatelite(id,nazwa){
+if(!confirm('Usunac czujnik "'+nazwa+'" (#'+id+') z listy?\n\nJesli wróci, zarejestruje sie ponownie automatycznie.'))return;
+fetch('/api/satelita/usun',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
 .then(r=>r.json()).then(d=>{if(d.ok)update();});
 }
 
@@ -1576,6 +1598,25 @@ void setupServer() {
             SatelitaInfo *s = znajdzSatelite(id);
             if (s) s->tylko_monitoring = mon;
             zapiszMonitoring();
+            req->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // Usuniecie satelity z listy
+    server.on("/api/satelita/usun", HTTP_POST, [](AsyncWebServerRequest *req) {},
+        NULL,
+        [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len)) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            int id = doc["id"] | 0;
+            if (id <= 0 || id >= MAX_SAT_ID) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            usunSatelite((uint8_t)id);
             req->send(200, "application/json", "{\"ok\":true}");
         }
     );

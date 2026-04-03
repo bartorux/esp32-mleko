@@ -79,9 +79,10 @@ Both devices share identical packed structs — keep them in sync when modifying
 - **Multi-satellite**: Matka supports up to `MAX_SATELITY` (8) satellites. Each tracked in `SatelitaInfo` struct array with: id, MAC, type (battery/mains), last measurement, timestamps, OTA state. Satellites auto-register on first message.
 - **Matka is a single file** (`matka/src/main.cpp`) — dashboard HTML, captive portal HTML, API handlers, Telegram bot, ESP-NOW callbacks, and config persistence all live in one file
 - **Build flags**: Matka uses `ARDUINO_USB_CDC_ON_BOOT=1`, `BOARD_HAS_PSRAM`, and `board_build.arduino.memory_type = qio_opi` (required for OPI PSRAM on S3 N16R8). Satelita does NOT use `ARDUINO_USB_CDC_ON_BOOT` — `esp32_bat` uses `-DPLATFORM_ESP32`, `esp32c3_zas` uses `-DPLATFORM_C3`
-- **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `interwal`, `cichy_od`, `cichy_do`. Satelita namespace `"satelita"` — keys: `id`, `typ`
+- **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `prog_wzrost`, `interwal`, `interwal_zasil`, `cichy_od`, `cichy_do`. Satelita namespace `"satelita"` — keys: `id`, `typ`
 - **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/nazwy.json` (satellite display names), `/monitoring.json` (only_monitoring flags, only `true` entries stored), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null)
 - **Satellite names**: Stored in `satellite_names[MAX_SAT_ID][32]` global (indexed by ID). Loaded at boot from LittleFS, applied to `SatelitaInfo.nazwa` when satellite registers. Editable via `POST /api/satelita/nazwa` and pencil icon in dashboard.
+- **Satellite removal**: `POST /api/satelita/usun` removes satellite from the in-memory `satelity[]` array and calls `esp_now_del_peer()`. Names and `tylko_monitoring` flags are preserved in LittleFS — auto-restored when satellite reconnects. `satelity[]` is NOT persisted across reboots by design.
 
 ## REST API (Matka, STA mode)
 
@@ -92,6 +93,7 @@ GET  /api/ustawienia       — current config
 POST /api/ustawienia       — update config (JSON body)
 POST /api/satelita/nazwa       — set satellite display name (JSON: {id, nazwa})
 POST /api/satelita/monitoring  — set monitoring-only flag (JSON: {id, tylko_monitoring})
+POST /api/satelita/usun        — remove satellite from tracking list (JSON: {id})
 POST /api/wifi-reset       — delete WiFi creds, restart to AP mode
 POST /ota/matka            — multipart firmware upload for Matka
 POST /ota/satelita/begin   — start chunked upload session (?size=XXXXX)
