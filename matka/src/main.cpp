@@ -50,9 +50,10 @@ const unsigned long POLL_INTERVAL = 10000; // sprawdzaj komendy co 10s (rzadziej
 // === Preferences ===
 
 Preferences prefs;
-float prog_max = 8.0;   // alarm gdy temp powyżej
-float prog_min = -99.0; // -99 = wyłączony; alarm gdy temp poniżej
-uint32_t interwal_s = 1800; // 30 min
+float prog_max = 8.0;    // alarm gdy temp powyżej
+float prog_min = -99.0;  // -99 = wyłączony; alarm gdy temp poniżej
+float prog_wzrost = 2.0; // °C/h — alert gdy wzrost szybszy; 0 = wyłączony
+uint32_t interwal_s = 1800; // 30 min (dla bateriowych)
 uint8_t cichy_od = 0;  // 0 = wyłączony
 uint8_t cichy_do = 0;
 
@@ -285,7 +286,7 @@ void wyslijACK(SatelitaInfo *s) {
     }
 
     struct_ack ack = {};
-    ack.nowy_interwal_s = interwal_s;
+    ack.nowy_interwal_s = (s->typ == 2) ? 300 : interwal_s;  // zasilaczowe: 5 min, bateriowe: interwal_s
     ack.godzina_start = 0;
     ack.godzina_stop = 0;
     ack.ota_pending = s->ota_pending;
@@ -394,6 +395,19 @@ void sprawdzAlerty(SatelitaInfo *s) {
         msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Niski poziom baterii: <b>";
         msg += String(s->pomiar.bateria_procent);
         msg += "%</b>";
+    } else if (!s->pomiar.blad_czujnika && prog_wzrost > 0 && s->hist_count >= 2) {
+        int last_idx = (s->hist_idx - 1 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+        int prev_idx = (s->hist_idx - 2 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
+        if (!s->historia[last_idx].pusty && !s->historia[prev_idx].pusty) {
+            float dt = (float)(s->historia[last_idx].czas_unix - s->historia[prev_idx].czas_unix) / 3600.0f;
+            if (dt > 0) {
+                float rate = (s->historia[last_idx].temperatura - s->historia[prev_idx].temperatura) / dt;
+                if (rate > prog_wzrost) {
+                    msg = "📈 <b>Smart Mleko</b>\n" + prefix + "Szybki wzrost temperatury: <b>+" + String(rate, 1) + "°C/h</b>";
+                    msg += "\n(próg: " + String(prog_wzrost, 1) + "°C/h)";
+                }
+            }
+        }
     }
 
     if (msg.length() > 0) {
@@ -428,16 +442,18 @@ void wczytajPreferences() {
     prefs.begin("mleko", false);
     prog_max = prefs.getFloat("prog_max", 8.0);
     prog_min = prefs.getFloat("prog_min", -99.0);
+    prog_wzrost = prefs.getFloat("prog_wzrost", 2.0);
     interwal_s = prefs.getUInt("interwal", 1800);
     cichy_od = prefs.getUChar("cichy_od", 0);
     cichy_do = prefs.getUChar("cichy_do", 0);
-    Serial.printf("[Prefs] max=%.1f min=%.1f interwal=%ds cichy=%d-%d\n",
-        prog_max, prog_min, interwal_s, cichy_od, cichy_do);
+    Serial.printf("[Prefs] max=%.1f min=%.1f wzrost=%.1f interwal=%ds cichy=%d-%d\n",
+        prog_max, prog_min, prog_wzrost, interwal_s, cichy_od, cichy_do);
 }
 
 void zapiszPreferences() {
     prefs.putFloat("prog_max", prog_max);
     prefs.putFloat("prog_min", prog_min);
+    prefs.putFloat("prog_wzrost", prog_wzrost);
     prefs.putUInt("interwal", interwal_s);
     prefs.putUChar("cichy_od", cichy_od);
     prefs.putUChar("cichy_do", cichy_do);
@@ -511,6 +527,26 @@ void obsluzKomende(const String &tekst) {
             } else {
                 wyslijTelegram("❌ Podaj temperaturę -30 do 50, np. /set_min 2.0\n"
                     "Lub /set_min wyl żeby wyłączyć alarm dolny.");
+            }
+        }
+
+    } else if (cmd.startsWith("/set_wzrost ")) {
+        String arg = cmd.substring(12);
+        arg.trim();
+        if (arg == "wyl" || arg == "wył" || arg == "0") {
+            prog_wzrost = 0.0;
+            zapiszPreferences();
+            wyslijTelegram("✅ Alert wzrostu temperatury <b>wyłączony</b>");
+        } else {
+            float val = arg.toFloat();
+            if (val > 0 && val <= 20) {
+                prog_wzrost = val;
+                zapiszPreferences();
+                wyslijTelegram("✅ Alert wzrostu ustawiony na <b>" + String(prog_wzrost, 1) + "°C/h</b>\n"
+                    "Dostaniesz alert gdy temperatura rośnie szybciej niż ta wartość.");
+            } else {
+                wyslijTelegram("❌ Podaj wartość 0.1–20, np. /set_wzrost 2.0\n"
+                    "Lub /set_wzrost 0 żeby wyłączyć.");
             }
         }
 
@@ -670,6 +706,7 @@ void obsluzKomende(const String &tekst) {
         msg += "\n<b>Ustawienia:</b>\n";
         msg += "Alarm górny: " + String(prog_max < 50 ? String(prog_max, 1) + "°C" : "wył") + "\n";
         msg += "Alarm dolny: " + String(prog_min > -50 ? String(prog_min, 1) + "°C" : "wył") + "\n";
+        msg += "Alert wzrostu: " + String(prog_wzrost > 0 ? String(prog_wzrost, 1) + "°C/h" : "wył") + "\n";
         msg += "Interwał: " + String(interwal_s / 60) + " min\n";
         if (cichy_od != 0 || cichy_do != 0) {
             msg += "Tryb cichy: " + String(cichy_od) + ":00—" + String(cichy_do) + ":00\n";
@@ -701,6 +738,7 @@ void obsluzKomende(const String &tekst) {
         msg += "<b>Alarmy:</b>\n";
         msg += "/set_max 8 — alarm gdy temp powyżej (°C)\n";
         msg += "/set_min 2 — alarm gdy temp poniżej (°C)\n";
+        msg += "/set_wzrost 2 — alert szybkiego wzrostu (°C/h), 0=wył\n";
         msg += "Wpisz <i>wyl</i> zamiast liczby żeby wyłączyć\n\n";
         msg += "<b>Pomiary:</b>\n";
         msg += "/interwal 30 — co ile minut mierzyć\n\n";
@@ -848,11 +886,19 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <title>Smart Mleko</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:20px}
-.header{text-align:center;margin-bottom:30px}
-.header h1{font-size:2em;color:#38bdf8}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:16px}
+.wrap{max-width:600px;margin:0 auto}
+.header{text-align:center;margin-bottom:24px}
+.header h1{font-size:1.8em;color:#38bdf8}
 .header .status{font-size:0.9em;color:#94a3b8;margin-top:5px}
-.card{background:#1e293b;border-radius:16px;padding:24px;margin-bottom:20px;border:1px solid #334155}
+.card{background:#1e293b;border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid #334155}
+@media(max-width:480px){
+.card{padding:14px;border-radius:12px}
+.temp-value{font-size:3em}
+.cfg-row{flex-wrap:wrap;gap:6px}
+.cfg-row>div:first-child{width:100%}
+.info-grid{grid-template-columns:1fr 1fr;gap:8px}
+}
 .card h2{color:#94a3b8;font-size:0.85em;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px}
 .temp-display{text-align:center;padding:20px 0}
 .temp-value{font-size:4em;font-weight:700;color:#22c55e}
@@ -883,6 +929,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 </style>
 </head>
 <body>
+<div class="wrap">
 <div class="header">
 <h1>Smart Mleko <span id="ver"></span></h1>
 <div class="status" id="czas">---</div>
@@ -908,11 +955,15 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="cfg-check"><input type="checkbox" id="maxOn" onchange="toggleMax()"><input type="number" id="cfgMax" step="0.5" style="width:75px"></div>
 </div>
 <div class="cfg-row">
-<div><label>Alarm dolny</label><div class="cfg-hint">Powiadomienie gdy temp poniej</div></div>
+<div><label>Alarm dolny</label><div class="cfg-hint">Powiadomienie gdy temp ponizej</div></div>
 <div class="cfg-check"><input type="checkbox" id="minOn" onchange="toggleMin()"><input type="number" id="cfgMin" step="0.5" style="width:75px"></div>
 </div>
 <div class="cfg-row">
-<div><label>Interwal pomiaru</label><div class="cfg-hint">Co ile minut czujnik mierzy</div></div>
+<div><label>Alert wzrostu</label><div class="cfg-hint">Alarm gdy temp rosnie zbyt szybko (C/h)</div></div>
+<div class="cfg-check"><input type="checkbox" id="wzrostOn" onchange="toggleWzrost()"><input type="number" id="cfgWzrost" step="0.5" min="0.1" max="20" style="width:75px"></div>
+</div>
+<div class="cfg-row">
+<div><label>Interwal pomiaru</label><div class="cfg-hint">Co ile minut czujnik bateryjny mierzy</div></div>
 <select id="cfgInt"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 godz</option><option value="120">2 godz</option></select>
 </div>
 <div class="cfg-row">
@@ -956,6 +1007,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="refresh-note">Odswiezanie co 5 sekund</div>
 
 <script>
+var nazwyMap={};
 function renderCzujniki(satelity){
 let c=document.getElementById('czujniki');
 if(!satelity||!satelity.length){
@@ -980,6 +1032,7 @@ trendHtml='<div style="font-size:1.2em;margin-top:8px"><span style="'+cls+'">'+a
 }
 let fwInfo=s.fw?' v'+s.fw:'';
 let nazwaDisplay=(s.nazwa&&s.nazwa.length>0)?s.nazwa:('Czujnik #'+s.id);
+nazwyMap[s.id]=nazwaDisplay;
 html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+')" title="Zmien nazwe" style="cursor:pointer;font-size:0.55em;color:#64748b;vertical-align:middle">&#9998;</span> <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
 html+='<div class="temp-display"><span class="'+tempClass+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
@@ -1059,7 +1112,9 @@ update();
 setInterval(update,5000);
 
 function zmienNazwe(id){
-var nowa=prompt('Nazwa czujnika #'+id+':');
+var aktualna=nazwyMap[id]||'';
+if(aktualna==='Czujnik #'+id)aktualna='';
+var nowa=prompt('Nazwa czujnika #'+id+':',aktualna);
 if(nowa===null)return;
 fetch('/api/satelita/nazwa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,nazwa:nowa.trim()})})
 .then(r=>r.json()).then(d=>{if(d.ok)update();});
@@ -1150,6 +1205,7 @@ e.appendChild(o2);
 
 function toggleMax(){document.getElementById('cfgMax').disabled=!document.getElementById('maxOn').checked}
 function toggleMin(){document.getElementById('cfgMin').disabled=!document.getElementById('minOn').checked}
+function toggleWzrost(){document.getElementById('cfgWzrost').disabled=!document.getElementById('wzrostOn').checked}
 function toggleCichy(){let on=document.getElementById('cichyOn').checked;document.getElementById('cfgCOd').disabled=!on;document.getElementById('cfgCDo').disabled=!on}
 
 function loadConfig(){
@@ -1162,6 +1218,10 @@ let minOn=d.prog_min>-50;
 document.getElementById('minOn').checked=minOn;
 document.getElementById('cfgMin').value=minOn?d.prog_min:0;
 document.getElementById('cfgMin').disabled=!minOn;
+let wzrostOn=d.prog_wzrost>0;
+document.getElementById('wzrostOn').checked=wzrostOn;
+document.getElementById('cfgWzrost').value=wzrostOn?d.prog_wzrost:2;
+document.getElementById('cfgWzrost').disabled=!wzrostOn;
 document.getElementById('cfgInt').value=d.interwal_min;
 let cOn=d.cichy_od!==0||d.cichy_do!==0;
 document.getElementById('cichyOn').checked=cOn;
@@ -1178,6 +1238,7 @@ btn.disabled=true;btn.textContent='Zapisuje...';
 let body={
 prog_max:document.getElementById('maxOn').checked?parseFloat(document.getElementById('cfgMax').value):99,
 prog_min:document.getElementById('minOn').checked?parseFloat(document.getElementById('cfgMin').value):-99,
+prog_wzrost:document.getElementById('wzrostOn').checked?parseFloat(document.getElementById('cfgWzrost').value):0,
 interwal_min:parseInt(document.getElementById('cfgInt').value),
 cichy_od:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCOd').value):0,
 cichy_do:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCDo').value):0
@@ -1194,6 +1255,7 @@ document.getElementById('cfgMsg').style.color='#fca5a5';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
 })}
 </script>
+</div>
 </body></html>
 )rawliteral";
 
@@ -1376,6 +1438,7 @@ void setupServer() {
         JsonDocument doc;
         doc["prog_max"] = prog_max;
         doc["prog_min"] = prog_min;
+        doc["prog_wzrost"] = prog_wzrost;
         doc["interwal_min"] = interwal_s / 60;
         doc["cichy_od"] = cichy_od;
         doc["cichy_do"] = cichy_do;
@@ -1396,12 +1459,13 @@ void setupServer() {
             }
             if (doc.containsKey("prog_max")) prog_max = doc["prog_max"].as<float>();
             if (doc.containsKey("prog_min")) prog_min = doc["prog_min"].as<float>();
+            if (doc.containsKey("prog_wzrost")) prog_wzrost = doc["prog_wzrost"].as<float>();
             if (doc.containsKey("interwal_min")) interwal_s = doc["interwal_min"].as<int>() * 60;
             if (doc.containsKey("cichy_od")) cichy_od = doc["cichy_od"].as<int>();
             if (doc.containsKey("cichy_do")) cichy_do = doc["cichy_do"].as<int>();
             zapiszPreferences();
-            Serial.printf("[WWW] Ustawienia zapisane: max=%.1f min=%.1f int=%ds cichy=%d-%d\n",
-                prog_max, prog_min, interwal_s, cichy_od, cichy_do);
+            Serial.printf("[WWW] Ustawienia zapisane: max=%.1f min=%.1f wzrost=%.1f int=%ds cichy=%d-%d\n",
+                prog_max, prog_min, prog_wzrost, interwal_s, cichy_od, cichy_do);
             req->send(200, "text/plain", "OK");
         }
     );
