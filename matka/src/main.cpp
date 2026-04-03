@@ -929,6 +929,13 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 .cfg-check{display:flex;align-items:center;gap:8px}
 .cfg-check input[type=checkbox]{width:18px;height:18px;accent-color:#16a34a}
 .sat-type{font-size:0.7em;color:#64748b;margin-left:6px}
+@media(min-width:768px){
+.wrap{max-width:1100px}
+#czujniki{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+#czujniki .card{margin-bottom:0}
+.bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.bottom-grid .card{margin-bottom:0}
+}
 </style>
 </head>
 <body>
@@ -940,6 +947,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 
 <div id="czujniki"></div>
 
+<div class="bottom-grid">
 <div class="card">
 <h2>System</h2>
 <div class="sys-info">
@@ -1008,6 +1016,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div id="otaSatStatus" style="margin-top:12px;font-size:0.85em;color:#94a3b8;text-align:center"></div>
 <div style="background:#0f172a;border-radius:8px;height:8px;margin-top:8px;display:none" id="otaSatBarWrap">
 <div id="otaSatBar" style="background:#7c3aed;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
+</div>
 </div>
 </div>
 
