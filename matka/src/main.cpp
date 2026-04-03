@@ -1166,7 +1166,7 @@ let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty a
 let monStyle=s.tylko_monitoring?'background:#f5f5f7;color:#6e6e73;border:1px solid #d2d2d7':'background:#e8f9ef;color:#1a7f3c;border:1px solid #b7f0cd';
 html+='<div style="text-align:center;margin-top:12px">';
 html+='<button style="'+monStyle+';padding:5px 14px;border-radius:20px;font-size:0.78em;cursor:pointer;font-weight:600" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button>';
-html+=' <button style="background:#fff0f0;color:#cc1c1c;border:1px solid #ffc9c9;padding:5px 12px;border-radius:20px;font-size:0.78em;cursor:pointer;font-weight:600" onclick="usunSatelite('+s.id+',''+nazwaDisplay+'')">&#x2715; Usun</button>';
+html+=' <button style="background:#fff0f0;color:#cc1c1c;border:1px solid #ffc9c9;padding:5px 12px;border-radius:20px;font-size:0.78em;cursor:pointer;font-weight:600" onclick="usunSatelite('+s.id+',\''+nazwaDisplay+'\')" >&#x2715; Usun</button>';
 html+='</div>';
 html+='<canvas id="chart_'+s.id+'" style="width:100%;margin-top:16px;border-radius:12px"></canvas>';
 html+='</div>';
