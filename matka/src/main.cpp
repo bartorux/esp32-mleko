@@ -92,6 +92,7 @@ struct SatelitaInfo {
     unsigned long ostatni_czas; // millis() ostatniego odbioru
     bool aktywna;
     bool ota_pending;
+    bool ota_url_wyslany;  // true po wysłaniu URL w ACK — przy następnej wiad. czyścimy flagę
     // Historia per satelita
     HistoriaWpis historia[MAX_HISTORIA_PER];
     int hist_idx;
@@ -106,6 +107,10 @@ int ile_satelit = 0;
 unsigned long boot_time = 0;
 String ip_adres = "";
 File ota_satelity_file;
+uint8_t *ota_buf = nullptr;
+size_t ota_buf_size = 0;
+size_t ota_buf_offset = 0;
+bool ota_write_pending = false;
 
 AsyncWebServer server(80);
 
@@ -215,19 +220,12 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         msg.id_czujnika, macToString(mac).c_str(),
         msg.temperatura, msg.bateria_procent);
 
-    // Reset OTA po udanym update
-    if (s->ota_pending && !msg.blad_czujnika) {
+    // Reset OTA — gdy satelita wróciła po restarcie (URL już był wysłany)
+    // NIE kasujemy .bin — jest nadpisywany przy kolejnym uploadzie z dashboardu
+    if (s->ota_pending && s->ota_url_wyslany) {
         s->ota_pending = false;
-        Serial.printf("[OTA] Satelita #%d zaktualizowana\n", s->id);
-        // Kasuj .bin dopiero gdy WSZYSTKIE satelity się zaktualizowały
-        bool ktos_czeka = false;
-        for (int i = 0; i < ile_satelit; i++) {
-            if (satelity[i].ota_pending) { ktos_czeka = true; break; }
-        }
-        if (!ktos_czeka) {
-            LittleFS.remove("/ota/satelita.bin");
-            Serial.println("[OTA] Wszystkie zaktualizowane — kasuje .bin");
-        }
+        s->ota_url_wyslany = false;
+        Serial.printf("[OTA] Satelita #%d — flaga wyczyszczona\n", s->id);
     }
 }
 
@@ -264,6 +262,7 @@ void wyslijACK(SatelitaInfo *s) {
         strlcpy(ack.wifi_ssid, ssid.c_str(), sizeof(ack.wifi_ssid));
         strlcpy(ack.wifi_pass, pass.c_str(), sizeof(ack.wifi_pass));
         Serial.printf("[ACK] OTA dla #%d: %s\n", s->id, ack.ota_url);
+        s->ota_url_wyslany = true;
     }
 
     esp_now_send(s->mac, (uint8_t*)&ack, sizeof(ack));
@@ -375,6 +374,7 @@ void sprawdzHeartbeat() {
         if (timeout < 300000UL) timeout = 300000UL; // minimum 5 min
 
         if ((millis() - s->ostatni_czas) > timeout) {
+            if (s->ota_url_wyslany) continue; // satelita jest w trakcie OTA — nie alarmuj
             if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
             wyslijTelegram("📡 <b>Smart Mleko</b>\nCzujnik #" + String(s->id) +
                 " milczy od: " + czasOd(s->ostatni_czas));
@@ -1075,7 +1075,8 @@ bar.style.width=p+'%';
 st.textContent=p+'% ('+Math.round(sent/1024)+'/'+Math.round(f.size/1024)+' KB)';
 await new Promise(r=>setTimeout(r,50));
 }
-// Finish
+// Poczekaj na ostatni body callback przed finish
+await new Promise(r=>setTimeout(r,300));
 let fr=await fetch('/ota/satelita/finish',{method:'POST'});
 let fsize=await fr.text();
 if(parseInt(fsize)===f.size){
@@ -1400,7 +1401,7 @@ void setupServer() {
     );
 
     // OTA Satelity — chunked upload API
-    // POST /ota/satelita/begin?size=XXXXX — rozpocznij upload
+    // POST /ota/satelita/begin?size=XXXXX — buforuj w PSRAM (LittleFS niedostępny podczas WiFi RX)
     server.on("/ota/satelita/begin", HTTP_POST, [](AsyncWebServerRequest *req) {
         if (!req->hasParam("size")) {
             req->send(400, "text/plain", "brak size");
@@ -1408,52 +1409,61 @@ void setupServer() {
         }
         int totalSize = req->getParam("size")->value().toInt();
         Serial.printf("[OTA-SAT] Begin: %d bajtow\n", totalSize);
-        LittleFS.mkdir("/ota");
-        LittleFS.remove("/ota/satelita.bin");
-        File f = LittleFS.open("/ota/satelita.bin", "w");
-        if (!f) {
-            req->send(500, "text/plain", "BLAD otwarcia pliku");
+        if (ota_buf) { free(ota_buf); ota_buf = nullptr; }
+        ota_buf = (uint8_t *)ps_malloc(totalSize);
+        if (!ota_buf) {
+            req->send(500, "text/plain", "BLAD alokacji PSRAM");
             return;
         }
-        f.close();
+        ota_buf_size = totalSize;
+        ota_buf_offset = 0;
         req->send(200, "text/plain", "OK");
     });
 
-    // POST /ota/satelita/chunk — body = raw binary, append to file
+    // POST /ota/satelita/chunk — memcpy do PSRAM (szybkie, bez zapisu flash)
     server.on("/ota/satelita/chunk", HTTP_POST, [](AsyncWebServerRequest *req) {
         req->send(200, "text/plain", "OK");
     }, NULL,
     [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
-        File f = LittleFS.open("/ota/satelita.bin", "a");
-        if (f) {
-            f.write(data, len);
-            f.close();
+        if (ota_buf && ota_buf_offset + len <= ota_buf_size) {
+            memcpy(ota_buf + ota_buf_offset, data, len);
+            ota_buf_offset += len;
         }
     });
 
-    // POST /ota/satelita/finish — zakończ i ustaw flagę OTA
+    // POST /ota/satelita/finish — ustaw flagę, zapis w loop() żeby nie blokować watchdoga
     server.on("/ota/satelita/finish", HTTP_POST, [](AsyncWebServerRequest *req) {
-        File f = LittleFS.open("/ota/satelita.bin", "r");
-        if (!f) {
-            req->send(500, "text/plain", "BLAD");
+        if (!ota_buf || ota_buf_offset == 0) {
+            req->send(500, "text/plain", "Brak danych w buforze");
             return;
         }
-        size_t fileSize = f.size();
-        f.close();
-        Serial.printf("[OTA-SAT] Finish: plik %u bajtow\n", fileSize);
-
-        // Ustaw OTA pending
-        for (int i = 0; i < ile_satelit; i++) {
-            satelity[i].ota_pending = true;
+        if (ota_buf_offset != ota_buf_size) {
+            Serial.printf("[OTA-SAT] BLAD: niepelny upload %d / %d\n", ota_buf_offset, ota_buf_size);
+            free(ota_buf); ota_buf = nullptr; ota_buf_offset = 0; ota_buf_size = 0;
+            req->send(400, "text/plain", "Niepelny upload: " + String(ota_buf_offset) + " / " + String(ota_buf_size));
+            return;
         }
-        Serial.printf("[OTA-SAT] Flaga ustawiona dla %d satelitow\n", ile_satelit);
-
-        String resp = String(fileSize);
-        req->send(200, "text/plain", resp);
+        size_t fileSize = ota_buf_offset;
+        ota_write_pending = true;
+        Serial.printf("[OTA-SAT] Finish: %d bajtow — zapis w tle\n", fileSize);
+        req->send(200, "text/plain", String(fileSize));
     });
 
-    // Serwowanie .bin dla Satelity
+    // Serwowanie .bin dla Satelity — z PSRAM jeśli dostępny (szybkie), fallback LittleFS
     server.on("/ota/satelita.bin", HTTP_GET, [](AsyncWebServerRequest *req) {
+        if (ota_buf && ota_buf_offset > 0) {
+            // Bezpośrednio z PSRAM — brak granic bloków LittleFS, pełne Content-Length
+            size_t total = ota_buf_offset;
+            AsyncWebServerResponse *resp = req->beginResponse("application/octet-stream", total,
+                [total](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+                    if (index >= total) return 0;
+                    size_t toSend = min(maxLen, total - index);
+                    memcpy(buffer, ota_buf + index, toSend);
+                    return toSend;
+                });
+            req->send(resp);
+            return;
+        }
         if (!LittleFS.exists("/ota/satelita.bin")) {
             req->send(404, "text/plain", "Brak pliku");
             return;
@@ -1602,6 +1612,31 @@ void setup() {
 // === Loop ===
 
 void loop() {
+    // Zapis PSRAM → LittleFS w kawałkach żeby nie blokować watchdoga
+    if (ota_write_pending && ota_buf && ota_buf_offset > 0) {
+        Serial.printf("[OTA-SAT] Zapisuje %d bajtow do LittleFS...\n", ota_buf_offset);
+        LittleFS.mkdir("/ota");
+        LittleFS.remove("/ota/satelita.bin");
+        File f = LittleFS.open("/ota/satelita.bin", "w");
+        if (f) {
+            const size_t CHUNK = 8192;
+            size_t offset = 0;
+            while (offset < ota_buf_offset) {
+                size_t n = min(CHUNK, ota_buf_offset - offset);
+                f.write(ota_buf + offset, n);
+                offset += n;
+                delay(1);
+            }
+            f.close();
+            Serial.printf("[OTA-SAT] Zapisano %d bajtow — flaga OTA dla %d satelitow\n", ota_buf_offset, ile_satelit);
+            for (int i = 0; i < ile_satelit; i++) satelity[i].ota_pending = true;
+        } else {
+            Serial.println("[OTA-SAT] BLAD otwarcia pliku!");
+        }
+        // NIE zwalniamy ota_buf — serwujemy bezposrednio z PSRAM (szybsze, bez granic blokow LittleFS)
+        ota_write_pending = false;
+    }
+
     if (tryb_ap) {
         dnsServer.processNextRequest();
         // Timeout AP — restart po 3 min

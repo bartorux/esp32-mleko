@@ -10,7 +10,7 @@
 
 // === Wersja ===
 
-#define SAT_FW_VERSION "2.4"
+#define SAT_FW_VERSION "2.8"
 
 // === Konfiguracja ===
 
@@ -25,7 +25,7 @@
 #else
   #define DEFAULT_TYP       1     // bateria (ESP32-S3 + 18650)
   #define PIN_DS18B20       4     // GPIO4 na WEMOS D1
-  #define PIN_ADC_BATERIA   34
+  #define PIN_ADC_BATERIA   35    // GPIO35 — wbudowany dzielnik 100k/100k na Lolin D32
   #define WSPOLCZYNNIK_ADC  2.0f
 #endif
 
@@ -70,11 +70,9 @@ volatile bool ack_otrzymany = false;
 struct_ack ostatni_ack;
 uint32_t interwal_s = INTERWAL_DOMYSLNY_S;
 
-// Kanał WiFi — zapisywany w RTC RAM (przeżywa deep sleep, nie przeżywa power off)
+// RTC RAM — przeżywa deep sleep, nie przeżywa power off
 RTC_DATA_ATTR uint8_t ostatni_kanal = 0;
-
-// Na etapie debugowania używamy delay() zamiast Deep Sleep
-// Deep Sleep wprowadzimy w Etapie 2
+RTC_DATA_ATTR uint32_t rtc_interwal_s = INTERWAL_DOMYSLNY_S;
 
 // === Callback ACK ===
 
@@ -203,102 +201,74 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     // Pobierz rozmiar pliku
     HTTPClient http;
     http.begin(url);
-    http.setTimeout(15000);
+    http.setTimeout(60000);
     int code = http.GET();
 
     if (code != 200) {
-        Serial.printf("[OTA] HTTP blad: %d\n", code);
+        Serial.printf("[OTA] HTTP blad: %d — restart\n", code);
         http.end();
-        return;
+        delay(500);
+        ESP.restart();
     }
 
     int totalSize = http.getSize();
-    http.end(); // zamknij — będziemy pobierać chunkami
+    // NIE zamykamy http — potrzebujemy strumienia do streamingu
 
     if (totalSize <= 0) {
-        Serial.println("[OTA] Pusty plik!");
-        return;
+        Serial.println("[OTA] Pusty plik — restart");
+        http.end();
+        delay(500);
+        ESP.restart();
     }
 
     Serial.printf("[OTA] Rozmiar: %d bajtow\n", totalSize);
 
     if (!Update.begin(totalSize)) {
-        Serial.println("[OTA] Update.begin failed!");
+        Serial.println("[OTA] Update.begin failed — restart");
         Update.printError(Serial);
-        return;
+        Update.abort();
+        http.end();
+        delay(500);
+        ESP.restart();
     }
 
-    // Pobieraj chunkami z retry — każdy chunk 64KB
+    // Stream całego pliku bez Range requests (ESPAsyncWebServer nie obsługuje Range)
+    WiFiClient *stream = http.getStreamPtr();
+    if (!stream) {
+        Serial.println("[OTA] Brak strumienia — restart");
+        Update.abort();
+        http.end();
+        delay(500);
+        ESP.restart();
+    }
+    uint8_t buf[512];
     int written = 0;
-    int chunkSize = 32768;
-    int maxRetries = 3;
+    unsigned long lastData = millis();
 
     while (written < totalSize) {
-        int remaining = totalSize - written;
-        int toFetch = min(remaining, chunkSize);
-        bool chunkOk = false;
-
-        for (int retry = 0; retry < maxRetries && !chunkOk; retry++) {
-            if (retry > 0) {
-                Serial.printf("[OTA] Retry chunk %d...\n", retry);
-                delay(1000);
-            }
-
-            HTTPClient chunkHttp;
-            chunkHttp.begin(url);
-            chunkHttp.setTimeout(15000);
-            // HTTP Range request
-            String rangeHeader = "bytes=" + String(written) + "-" + String(written + toFetch - 1);
-            chunkHttp.addHeader("Range", rangeHeader);
-
-            int chunkCode = chunkHttp.GET();
-            if (chunkCode != 206 && chunkCode != 200) {
-                Serial.printf("[OTA] Chunk HTTP blad: %d\n", chunkCode);
-                chunkHttp.end();
-                continue;
-            }
-
-            WiFiClient *stream = chunkHttp.getStreamPtr();
-            uint8_t buf[512];
-            int chunkWritten = 0;
-            unsigned long lastData = millis();
-
-            while (chunkWritten < toFetch) {
-                int available = stream->available();
-                if (available > 0) {
-                    int toRead = min(available, min(toFetch - chunkWritten, (int)sizeof(buf)));
-                    int readBytes = stream->readBytes(buf, toRead);
-                    if (readBytes > 0) {
-                        Update.write(buf, readBytes);
-                        chunkWritten += readBytes;
-                        lastData = millis();
-                    }
-                } else {
-                    if (millis() - lastData > 10000) break;
-                    delay(5);
-                    yield();
+        int available = stream->available();
+        if (available > 0) {
+            int toRead = min(available, min(totalSize - written, (int)sizeof(buf)));
+            int n = stream->readBytes(buf, toRead);
+            if (n > 0) {
+                Update.write(buf, n);
+                written += n;
+                lastData = millis();
+                if (written % (totalSize / 10) < 512) {
+                    Serial.printf("[OTA] %d / %d (%d%%)\n", written, totalSize, written * 100 / totalSize);
                 }
             }
-
-            chunkHttp.end();
-
-            if (chunkWritten == toFetch) {
-                chunkOk = true;
-                written += chunkWritten;
-                Serial.printf("[OTA] %d / %d (%d%%)\n", written, totalSize, written * 100 / totalSize);
-            } else {
-                Serial.printf("[OTA] Chunk niepelny: %d / %d\n", chunkWritten, toFetch);
-                // Nie możemy kontynuować Update z luką — abort
+        } else {
+            if (millis() - lastData > 30000) {
+                Serial.println("[OTA] Timeout!");
                 break;
             }
-        }
-
-        if (!chunkOk) {
-            Serial.println("[OTA] Nie udalo sie pobrac chunk — abort");
-            break;
+            delay(10);
+            yield();
         }
     }
 
+    http.end();
     Serial.printf("[OTA] Pobrano: %d / %d bajtow\n", written, totalSize);
 
     if (written == totalSize && Update.end(true)) {
@@ -308,12 +278,10 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     } else {
         Serial.println("[OTA] BLAD!");
         Update.printError(Serial);
+        Update.abort();
+        delay(500);
+        ESP.restart();
     }
-
-    http.end();
-    Serial.println("[OTA] Restart...");
-    delay(500);
-    ESP.restart();
 }
 
 // === Setup ===
@@ -332,6 +300,7 @@ void setup() {
     }
     id_czujnika = prefs.getUChar("id", DEFAULT_ID);
     typ_zasilania = prefs.getUChar("typ", DEFAULT_TYP);
+    interwal_s = rtc_interwal_s; // przywróć interwał z poprzedniego cyklu
 
     Serial.println();
     Serial.println("================================");
@@ -366,7 +335,7 @@ void setup() {
     esp_now_add_peer(&peer);
 
     Serial.println("[OK] ESP-NOW aktywny");
-    Serial.printf("[OK] Interwal: %d sekund (delay na etapie debug)\n", interwal_s);
+    Serial.printf("[OK] Interwal: %lu sekund\n", (unsigned long)interwal_s);
     Serial.println();
 }
 
@@ -429,6 +398,7 @@ void loop() {
 
         if (ostatni_ack.nowy_interwal_s > 0) {
             interwal_s = ostatni_ack.nowy_interwal_s;
+            rtc_interwal_s = interwal_s; // zapisz w RTC RAM — przeżyje deep sleep
             Serial.printf("[ACK] Nowy interwal: %d s\n", interwal_s);
         }
         if (ostatni_ack.ota_pending && strlen(ostatni_ack.ota_url) > 0 && strlen(ostatni_ack.wifi_ssid) > 0) {
@@ -437,9 +407,16 @@ void loop() {
         }
     }
 
-    // Na etapie debug: delay zamiast Deep Sleep
-    Serial.printf("[SLEEP] Czekam %d sekund...\n\n", interwal_s);
-
-    // Dla debugowania skracamy do 10 sekund
-    delay(10000);
+    if (typ_zasilania == 1) {
+        // Bateria — Deep Sleep
+        uint32_t sleep_s = polaczono ? interwal_s : 60; // brak Matki → krótki retry
+        Serial.printf("[SLEEP] Deep sleep %lu s...\n\n", sleep_s);
+        Serial.flush();
+        prefs.end();
+        esp_deep_sleep(sleep_s * 1000000ULL);
+    } else {
+        // Zasilacz — delay w pętli (always on)
+        Serial.printf("[SLEEP] Czekam %lu s...\n\n", (unsigned long)interwal_s);
+        delay(interwal_s * 1000);
+    }
 }
