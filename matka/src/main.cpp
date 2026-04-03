@@ -931,8 +931,6 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 .sat-type{font-size:0.7em;color:#64748b;margin-left:6px}
 @media(min-width:768px){
 .wrap{max-width:1100px}
-#czujniki{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-#czujniki .card{margin-bottom:0}
 .bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .bottom-grid .card{margin-bottom:0}
 }
@@ -1072,7 +1070,7 @@ let cv=document.getElementById('chart_'+sat.id);
 if(!cv||!sat.dane||sat.dane.length<2)return;
 let ctx=cv.getContext('2d');
 let w=cv.width=cv.offsetWidth;
-let h=cv.height=150;
+let h=cv.height=window.innerWidth>=768?280:150;
 let d=sat.dane;
 let vmin=999,vmax=-999;
 d.forEach(function(p){if(p.v<vmin)vmin=p.v;if(p.v>vmax)vmax=p.v});
