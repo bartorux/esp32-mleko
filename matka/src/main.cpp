@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "4.5"
+#define FW_VERSION "4.7"
 
 // === WiFi ===
 
@@ -24,10 +24,12 @@
 #define AP_TIMEOUT_MS 180000  // 3 min
 #define WIFI_CREDS_PATH "/wifi.json"
 #define NAZWY_PATH "/nazwy.json"
+#define MONITORING_PATH "/monitoring.json"
 
-// Cache nazw satelit indexed by ID (0 nieużywany, IDs 1-8)
+// Cache nazw i flag satelit indexed by ID (0 nieużywany, IDs 1-8)
 #define MAX_SAT_ID 9
 char satellite_names[MAX_SAT_ID][32] = {};
+bool satellite_monitoring[MAX_SAT_ID] = {};  // false = alerty aktywne (domyślnie)
 
 DNSServer dnsServer;
 bool tryb_ap = false;
@@ -101,6 +103,7 @@ struct SatelitaInfo {
     bool ota_pending;
     bool ota_url_wyslany;  // true po wysłaniu URL w ACK — przy następnej wiad. czyścimy flagę
     char nazwa[32];         // nazwa nadana przez użytkownika, pusta = "Czujnik #N"
+    bool tylko_monitoring;  // true = brak alertów Telegram, tylko podgląd
     // Historia per satelita
     HistoriaWpis historia[MAX_HISTORIA_PER];
     int hist_idx;
@@ -148,6 +151,7 @@ SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac
     if (id > 0 && id < MAX_SAT_ID && strlen(satellite_names[id]) > 0) {
         strlcpy(s->nazwa, satellite_names[id], sizeof(s->nazwa));
     }
+    s->tylko_monitoring = (id > 0 && id < MAX_SAT_ID) ? satellite_monitoring[id] : false;
     for (int i = 0; i < MAX_HISTORIA_PER; i++) s->historia[i].pusty = true;
     Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
         id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -198,6 +202,36 @@ void zapiszNazwy() {
         }
     }
     File f = LittleFS.open(NAZWY_PATH, "w");
+    if (!f) return;
+    serializeJson(doc, f);
+    f.close();
+}
+
+// === Flagi "tylko monitoring" (LittleFS) ===
+
+void wczytajMonitoring() {
+    File f = LittleFS.open(MONITORING_PATH, "r");
+    if (!f) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, f)) { f.close(); return; }
+    f.close();
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        int id = atoi(kv.key().c_str());
+        if (id > 0 && id < MAX_SAT_ID) {
+            satellite_monitoring[id] = kv.value().as<bool>();
+        }
+    }
+    Serial.println("[FS] Flagi monitoring wczytane");
+}
+
+void zapiszMonitoring() {
+    JsonDocument doc;
+    for (int id = 1; id < MAX_SAT_ID; id++) {
+        if (satellite_monitoring[id]) {
+            doc[String(id)] = true;
+        }
+    }
+    File f = LittleFS.open(MONITORING_PATH, "w");
     if (!f) return;
     serializeJson(doc, f);
     f.close();
@@ -368,6 +402,7 @@ bool czyTrybCichy() {
 }
 
 void sprawdzAlerty(SatelitaInfo *s) {
+    if (s->tylko_monitoring) return;
     if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
 
     String prefix = "Czujnik #" + String(s->id) + ": ";
@@ -1021,6 +1056,8 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="refresh-note">Odswiezanie co 5 sekund</div>
 
 <script>
+var KOLORY=['','#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399','#fb923c','#e879f9'];
+function kolorSat(id){return KOLORY[id]||'#38bdf8';}
 var nazwyMap={};
 function renderCzujniki(satelity){
 let c=document.getElementById('czujniki');
@@ -1049,12 +1086,16 @@ let nazwaDisplay=(s.nazwa&&s.nazwa.length>0)?s.nazwa:('Czujnik #'+s.id);
 nazwyMap[s.id]=nazwaDisplay;
 html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+')" title="Zmien nazwe" style="cursor:pointer;font-size:0.55em;color:#64748b;vertical-align:middle">&#9998;</span> <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
-html+='<div class="temp-display"><span class="'+tempClass+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
+let kolor=s.blad_czujnika?'':';color:'+kolorSat(s.id);
+html+='<div class="temp-display"><span class="'+tempClass+'" style="'+kolor+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
 html+='<div class="info-grid">';
 if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';}
 else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#22c55e">Sieciowe</div></div>';}
 html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value">'+s.ostatni+'</div></div>';
 html+='</div>';
+let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty aktywne';
+let monStyle=s.tylko_monitoring?'background:#334155;color:#94a3b8':'background:#166534;color:#4ade80';
+html+='<div style="text-align:center;margin-top:10px"><button style="'+monStyle+';border:none;padding:5px 14px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button></div>';
 html+='<canvas id="chart_'+s.id+'" height="150" style="width:100%;margin-top:16px;background:#0f172a;border-radius:10px"></canvas>';
 html+='</div>';
 });
@@ -1089,7 +1130,7 @@ ctx.fillStyle='#64748b';ctx.font='11px sans-serif';ctx.textAlign='right';
 ctx.fillText(val.toFixed(1),36,y+4);
 }
 // Linia
-ctx.strokeStyle='#38bdf8';ctx.lineWidth=2;
+ctx.strokeStyle=kolorSat(sat.id);ctx.lineWidth=2;
 ctx.beginPath();
 d.forEach(function(p,i){
 let x=40+((p.t-tmin)/(tmax-tmin))*(w-50);
@@ -1125,6 +1166,10 @@ renderCzujniki(d.satelity);
 update();
 setInterval(update,5000);
 
+function toggleMonitoring(id,obecny){
+fetch('/api/satelita/monitoring',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,tylko_monitoring:!obecny})})
+.then(r=>r.json()).then(d=>{if(d.ok)update();});
+}
 function zmienNazwe(id){
 var aktualna=nazwyMap[id]||'';
 if(aktualna==='Czujnik #'+id)aktualna='';
@@ -1391,6 +1436,7 @@ void setupServer() {
             JsonObject o = arr.add<JsonObject>();
             o["id"] = s->id;
             o["nazwa"] = s->nazwa;
+            o["tylko_monitoring"] = s->tylko_monitoring;
             o["typ"] = s->typ;
             o["mac"] = macToString(s->mac);
             o["temperatura"] = s->pomiar.temperatura;
@@ -1507,6 +1553,29 @@ void setupServer() {
             SatelitaInfo *s = znajdzSatelite(id);
             if (s) strlcpy(s->nazwa, nazwa, sizeof(s->nazwa));
             zapiszNazwy();
+            req->send(200, "application/json", "{\"ok\":true}");
+        }
+    );
+
+    // Flaga "tylko monitoring" per satelita
+    server.on("/api/satelita/monitoring", HTTP_POST, [](AsyncWebServerRequest *req) {},
+        NULL,
+        [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len)) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            int id = doc["id"] | 0;
+            bool mon = doc["tylko_monitoring"] | false;
+            if (id <= 0 || id >= MAX_SAT_ID) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            satellite_monitoring[id] = mon;
+            SatelitaInfo *s = znajdzSatelite(id);
+            if (s) s->tylko_monitoring = mon;
+            zapiszMonitoring();
             req->send(200, "application/json", "{\"ok\":true}");
         }
     );
@@ -1688,6 +1757,7 @@ void setup() {
         Serial.println("[FS] LittleFS mount failed!");
     }
     wczytajNazwy();
+    wczytajMonitoring();
 
     // Preferences
     wczytajPreferences();
