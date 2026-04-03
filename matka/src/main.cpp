@@ -23,6 +23,11 @@
 #define AP_SSID "Smart_Mleko_Setup"
 #define AP_TIMEOUT_MS 180000  // 3 min
 #define WIFI_CREDS_PATH "/wifi.json"
+#define NAZWY_PATH "/nazwy.json"
+
+// Cache nazw satelit indexed by ID (0 nieużywany, IDs 1-8)
+#define MAX_SAT_ID 9
+char satellite_names[MAX_SAT_ID][32] = {};
 
 DNSServer dnsServer;
 bool tryb_ap = false;
@@ -93,6 +98,7 @@ struct SatelitaInfo {
     bool aktywna;
     bool ota_pending;
     bool ota_url_wyslany;  // true po wysłaniu URL w ACK — przy następnej wiad. czyścimy flagę
+    char nazwa[32];         // nazwa nadana przez użytkownika, pusta = "Czujnik #N"
     // Historia per satelita
     HistoriaWpis historia[MAX_HISTORIA_PER];
     int hist_idx;
@@ -137,6 +143,9 @@ SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac
     s->typ = typ > 0 ? typ : 1;
     memcpy(s->mac, mac, 6);
     s->aktywna = true;
+    if (id > 0 && id < MAX_SAT_ID && strlen(satellite_names[id]) > 0) {
+        strlcpy(s->nazwa, satellite_names[id], sizeof(s->nazwa));
+    }
     for (int i = 0; i < MAX_HISTORIA_PER; i++) s->historia[i].pusty = true;
     Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
         id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -160,6 +169,36 @@ void dodajDoHistorii(SatelitaInfo *s, float temp) {
     s->historia[s->hist_idx].pusty = false;
     s->hist_idx = (s->hist_idx + 1) % MAX_HISTORIA_PER;
     if (s->hist_count < MAX_HISTORIA_PER) s->hist_count++;
+}
+
+// === Nazwy satelit (LittleFS) ===
+
+void wczytajNazwy() {
+    File f = LittleFS.open(NAZWY_PATH, "r");
+    if (!f) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, f)) { f.close(); return; }
+    f.close();
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        int id = atoi(kv.key().c_str());
+        if (id > 0 && id < MAX_SAT_ID) {
+            strlcpy(satellite_names[id], kv.value().as<const char*>(), 32);
+        }
+    }
+    Serial.println("[FS] Nazwy satelit wczytane");
+}
+
+void zapiszNazwy() {
+    JsonDocument doc;
+    for (int id = 1; id < MAX_SAT_ID; id++) {
+        if (strlen(satellite_names[id]) > 0) {
+            doc[String(id)] = satellite_names[id];
+        }
+    }
+    File f = LittleFS.open(NAZWY_PATH, "w");
+    if (!f) return;
+    serializeJson(doc, f);
+    f.close();
 }
 
 // === WiFi Credentials (LittleFS) ===
@@ -940,7 +979,8 @@ let sign=s.trend>=0?'+':'';
 trendHtml='<div style="font-size:1.2em;margin-top:8px"><span style="'+cls+'">'+arrow+' '+sign+s.trend.toFixed(1)+'\u00b0C/h</span></div>';
 }
 let fwInfo=s.fw?' v'+s.fw:'';
-html+='<div class="card"><h2>Czujnik #'+s.id+' <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
+let nazwaDisplay=(s.nazwa&&s.nazwa.length>0)?s.nazwa:('Czujnik #'+s.id);
+html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+')" title="Zmien nazwe" style="cursor:pointer;font-size:0.55em;color:#64748b;vertical-align:middle">&#9998;</span> <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
 html+='<div class="temp-display"><span class="'+tempClass+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
 html+='<div class="info-grid">';
@@ -1017,6 +1057,13 @@ renderCzujniki(d.satelity);
 }
 update();
 setInterval(update,5000);
+
+function zmienNazwe(id){
+var nowa=prompt('Nazwa czujnika #'+id+':');
+if(nowa===null)return;
+fetch('/api/satelita/nazwa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,nazwa:nowa.trim()})})
+.then(r=>r.json()).then(d=>{if(d.ok)update();});
+}
 
 function uploadOTA(){
 let f=document.getElementById('otaFile').files[0];
@@ -1265,6 +1312,7 @@ void setupServer() {
             SatelitaInfo *s = &satelity[i];
             JsonObject o = arr.add<JsonObject>();
             o["id"] = s->id;
+            o["nazwa"] = s->nazwa;
             o["typ"] = s->typ;
             o["mac"] = macToString(s->mac);
             o["temperatura"] = s->pomiar.temperatura;
@@ -1355,6 +1403,29 @@ void setupServer() {
             Serial.printf("[WWW] Ustawienia zapisane: max=%.1f min=%.1f int=%ds cichy=%d-%d\n",
                 prog_max, prog_min, interwal_s, cichy_od, cichy_do);
             req->send(200, "text/plain", "OK");
+        }
+    );
+
+    // Nazwa satelity
+    server.on("/api/satelita/nazwa", HTTP_POST, [](AsyncWebServerRequest *req) {},
+        NULL,
+        [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
+            JsonDocument doc;
+            if (deserializeJson(doc, data, len)) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            int id = doc["id"] | 0;
+            const char *nazwa = doc["nazwa"] | "";
+            if (id <= 0 || id >= MAX_SAT_ID) {
+                req->send(400, "application/json", "{\"ok\":false}");
+                return;
+            }
+            strlcpy(satellite_names[id], nazwa, 32);
+            SatelitaInfo *s = znajdzSatelite(id);
+            if (s) strlcpy(s->nazwa, nazwa, sizeof(s->nazwa));
+            zapiszNazwy();
+            req->send(200, "application/json", "{\"ok\":true}");
         }
     );
 
@@ -1534,6 +1605,7 @@ void setup() {
     if (!LittleFS.begin(true)) {
         Serial.println("[FS] LittleFS mount failed!");
     }
+    wczytajNazwy();
 
     // Preferences
     wczytajPreferences();

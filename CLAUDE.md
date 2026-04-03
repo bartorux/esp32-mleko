@@ -80,7 +80,8 @@ Both devices share identical packed structs — keep them in sync when modifying
 - **Matka is a single file** (`matka/src/main.cpp`) — dashboard HTML, captive portal HTML, API handlers, Telegram bot, ESP-NOW callbacks, and config persistence all live in one file
 - **Build flags**: Matka uses `ARDUINO_USB_CDC_ON_BOOT=1`, `BOARD_HAS_PSRAM`, and `board_build.arduino.memory_type = qio_opi` (required for OPI PSRAM on S3 N16R8). Satelita does NOT use `ARDUINO_USB_CDC_ON_BOOT` — `esp32_bat` uses `-DPLATFORM_ESP32`, `esp32c3_zas` uses `-DPLATFORM_C3`
 - **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `interwal`, `cichy_od`, `cichy_do`. Satelita namespace `"satelita"` — keys: `id`, `typ`
-- **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null)
+- **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/nazwy.json` (satellite display names, JSON object keyed by string ID), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null)
+- **Satellite names**: Stored in `satellite_names[MAX_SAT_ID][32]` global (indexed by ID). Loaded at boot from LittleFS, applied to `SatelitaInfo.nazwa` when satellite registers. Editable via `POST /api/satelita/nazwa` and pencil icon in dashboard.
 
 ## REST API (Matka, STA mode)
 
@@ -89,6 +90,7 @@ GET  /api/status           — sensor data + system info
 GET  /api/historia         — ring buffer per satellite (48 entries, 24h at 30min). Supports ?id=X filter
 GET  /api/ustawienia       — current config
 POST /api/ustawienia       — update config (JSON body)
+POST /api/satelita/nazwa   — set satellite display name (JSON: {id, nazwa})
 POST /api/wifi-reset       — delete WiFi creds, restart to AP mode
 POST /ota/matka            — multipart firmware upload for Matka
 POST /ota/satelita/begin   — start chunked upload session (?size=XXXXX)
