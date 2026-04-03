@@ -1043,11 +1043,11 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;color:#1d
 <body>
 <div class="wrap">
 <div class="header">
-<h1>Smart Mleko <span id="ver" style="font-size:0.48em;background:#f5f5f7;color:#6e6e73;padding:2px 8px;border-radius:8px;font-weight:500;vertical-align:middle"></span></h1>
+<h1>Smart Mleko <span id="ver" style="font-size:0.45em;color:#aeaeb2;font-weight:400;letter-spacing:0;vertical-align:middle"></span></h1>
 <div class="status" id="czas">---</div>
 </div>
 
-<div id="czujniki"></div>
+<div id="czujniki"><div class="card"><h2>Czujniki</h2><div style="text-align:center;color:#aeaeb2;padding:20px">Ladowanie...</div></div></div>
 
 <div class="bottom-grid">
 <div class="card">
