@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "4.9"
+#define FW_VERSION "5.0"
 
 // === WiFi ===
 
