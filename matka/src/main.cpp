@@ -53,7 +53,8 @@ Preferences prefs;
 float prog_max = 8.0;    // alarm gdy temp powyżej
 float prog_min = -99.0;  // -99 = wyłączony; alarm gdy temp poniżej
 float prog_wzrost = 2.0; // °C/h — alert gdy wzrost szybszy; 0 = wyłączony
-uint32_t interwal_s = 1800; // 30 min (dla bateriowych)
+uint32_t interwal_s = 1800;       // sekundy — dla bateriowych (deep sleep)
+uint32_t interwal_zasil_s = 300;  // sekundy — dla zasilaczowych (always on)
 uint8_t cichy_od = 0;  // 0 = wyłączony
 uint8_t cichy_do = 0;
 
@@ -286,7 +287,7 @@ void wyslijACK(SatelitaInfo *s) {
     }
 
     struct_ack ack = {};
-    ack.nowy_interwal_s = (s->typ == 2) ? 300 : interwal_s;  // zasilaczowe: 5 min, bateriowe: interwal_s
+    ack.nowy_interwal_s = (s->typ == 2) ? interwal_zasil_s : interwal_s;
     ack.godzina_start = 0;
     ack.godzina_stop = 0;
     ack.ota_pending = s->ota_pending;
@@ -444,6 +445,7 @@ void wczytajPreferences() {
     prog_min = prefs.getFloat("prog_min", -99.0);
     prog_wzrost = prefs.getFloat("prog_wzrost", 2.0);
     interwal_s = prefs.getUInt("interwal", 1800);
+    interwal_zasil_s = prefs.getUInt("interwal_zasil", 300);
     cichy_od = prefs.getUChar("cichy_od", 0);
     cichy_do = prefs.getUChar("cichy_do", 0);
     Serial.printf("[Prefs] max=%.1f min=%.1f wzrost=%.1f interwal=%ds cichy=%d-%d\n",
@@ -455,6 +457,7 @@ void zapiszPreferences() {
     prefs.putFloat("prog_min", prog_min);
     prefs.putFloat("prog_wzrost", prog_wzrost);
     prefs.putUInt("interwal", interwal_s);
+    prefs.putUInt("interwal_zasil", interwal_zasil_s);
     prefs.putUChar("cichy_od", cichy_od);
     prefs.putUChar("cichy_do", cichy_do);
 }
@@ -963,8 +966,12 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="cfg-check"><input type="checkbox" id="wzrostOn" onchange="toggleWzrost()"><input type="number" id="cfgWzrost" step="0.5" min="0.1" max="20" style="width:75px"></div>
 </div>
 <div class="cfg-row">
-<div><label>Interwal pomiaru</label><div class="cfg-hint">Co ile minut czujnik bateryjny mierzy</div></div>
+<div><label>Interwal - bateria</label><div class="cfg-hint">Co ile minut czujnik bateryjny mierzy</div></div>
 <select id="cfgInt"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 godz</option><option value="120">2 godz</option></select>
+</div>
+<div class="cfg-row">
+<div><label>Interwal - zasilacz</label><div class="cfg-hint">Co ile minut czujnik sieciowy mierzy</div></div>
+<select id="cfgIntZ"><option value="1">1 min</option><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option></select>
 </div>
 <div class="cfg-row">
 <div><label>Tryb cichy</label><div class="cfg-hint">Wycisz lagodne alerty w nocy</div></div>
@@ -1223,6 +1230,7 @@ document.getElementById('wzrostOn').checked=wzrostOn;
 document.getElementById('cfgWzrost').value=wzrostOn?d.prog_wzrost:2;
 document.getElementById('cfgWzrost').disabled=!wzrostOn;
 document.getElementById('cfgInt').value=d.interwal_min;
+document.getElementById('cfgIntZ').value=d.interwal_zasil_min;
 let cOn=d.cichy_od!==0||d.cichy_do!==0;
 document.getElementById('cichyOn').checked=cOn;
 document.getElementById('cfgCOd').value=d.cichy_od;
@@ -1240,6 +1248,7 @@ prog_max:document.getElementById('maxOn').checked?parseFloat(document.getElement
 prog_min:document.getElementById('minOn').checked?parseFloat(document.getElementById('cfgMin').value):-99,
 prog_wzrost:document.getElementById('wzrostOn').checked?parseFloat(document.getElementById('cfgWzrost').value):0,
 interwal_min:parseInt(document.getElementById('cfgInt').value),
+interwal_zasil_min:parseInt(document.getElementById('cfgIntZ').value),
 cichy_od:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCOd').value):0,
 cichy_do:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCDo').value):0
 };
@@ -1440,6 +1449,7 @@ void setupServer() {
         doc["prog_min"] = prog_min;
         doc["prog_wzrost"] = prog_wzrost;
         doc["interwal_min"] = interwal_s / 60;
+        doc["interwal_zasil_min"] = interwal_zasil_s / 60;
         doc["cichy_od"] = cichy_od;
         doc["cichy_do"] = cichy_do;
         String json;
@@ -1461,6 +1471,7 @@ void setupServer() {
             if (doc.containsKey("prog_min")) prog_min = doc["prog_min"].as<float>();
             if (doc.containsKey("prog_wzrost")) prog_wzrost = doc["prog_wzrost"].as<float>();
             if (doc.containsKey("interwal_min")) interwal_s = doc["interwal_min"].as<int>() * 60;
+            if (doc.containsKey("interwal_zasil_min")) interwal_zasil_s = doc["interwal_zasil_min"].as<int>() * 60;
             if (doc.containsKey("cichy_od")) cichy_od = doc["cichy_od"].as<int>();
             if (doc.containsKey("cichy_do")) cichy_do = doc["cichy_do"].as<int>();
             zapiszPreferences();
