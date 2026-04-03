@@ -992,49 +992,50 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <title>Smart Mleko</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:16px}
+body{font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;color:#1d1d1f;min-height:100vh;padding:16px}
 .wrap{max-width:600px;margin:0 auto}
-.header{text-align:center;margin-bottom:24px}
-.header h1{font-size:1.8em;color:#38bdf8}
-.header .status{font-size:0.9em;color:#94a3b8;margin-top:5px}
-.card{background:#1e293b;border-radius:16px;padding:20px;margin-bottom:16px;border:1px solid #334155}
+.header{text-align:center;margin-bottom:24px;padding-top:8px}
+.header h1{font-size:1.5em;font-weight:600;color:#1d1d1f;letter-spacing:-0.3px}
+.header .status{font-size:0.85em;color:#6e6e73;margin-top:4px}
+.card{background:#fff;border-radius:18px;padding:20px;margin-bottom:14px;box-shadow:0 2px 20px rgba(0,0,0,0.07)}
 @media(max-width:480px){
-.card{padding:14px;border-radius:12px}
-.temp-value{font-size:3em}
+.card{padding:14px;border-radius:14px}
+.temp-value{font-size:3.2em}
 .cfg-row{flex-wrap:wrap;gap:6px}
 .cfg-row>div:first-child{width:100%}
-.info-grid{grid-template-columns:1fr 1fr;gap:8px}
 }
-.card h2{color:#94a3b8;font-size:0.85em;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px}
-.temp-display{text-align:center;padding:20px 0}
-.temp-value{font-size:4em;font-weight:700;color:#22c55e}
-.temp-value.alarm{color:#ef4444}
-.temp-value.blad{color:#f59e0b}
-.temp-unit{font-size:1.5em;color:#94a3b8}
-.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.info-item{background:#0f172a;border-radius:10px;padding:14px}
-.info-label{font-size:0.75em;color:#64748b;text-transform:uppercase}
-.info-value{font-size:1.3em;font-weight:600;margin-top:4px}
-.bat-ok{color:#22c55e} .bat-mid{color:#f59e0b} .bat-low{color:#ef4444}
-.status-badge{display:inline-block;padding:6px 14px;border-radius:20px;font-size:0.85em;font-weight:600}
-.status-ok{background:#166534;color:#4ade80}
-.status-wait{background:#854d0e;color:#fbbf24}
-.status-err{background:#991b1b;color:#fca5a5}
-.sys-info{font-size:0.8em;color:#64748b;line-height:1.8}
-.refresh-note{text-align:center;font-size:0.75em;color:#475569;margin-top:10px}
-.cfg-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.cfg-row label{font-size:0.85em;color:#94a3b8;flex:1}
-.cfg-row input,.cfg-row select{background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:8px;padding:8px 12px;width:90px;font-size:0.95em;text-align:center}
-.cfg-row .cfg-hint{font-size:0.7em;color:#64748b;margin-top:2px}
-.cfg-btn{background:#16a34a;color:white;border:none;padding:12px 24px;border-radius:10px;font-size:1em;cursor:pointer;width:100%;margin-top:8px}
-.cfg-btn:disabled{background:#334155;cursor:default}
+.card h2{color:#6e6e73;font-size:0.75em;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:16px;font-weight:600}
+.temp-display{text-align:center;padding:16px 0 8px}
+.temp-value{font-size:4.5em;font-weight:200;letter-spacing:-2px;color:#1d1d1f}
+.temp-value.alarm{color:#ff3b30!important}
+.temp-value.blad{color:#ff9f0a!important}
+.temp-unit{font-size:1.8em;font-weight:300;color:#6e6e73}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.info-item{background:#f5f5f7;border-radius:12px;padding:12px}
+.info-label{font-size:0.7em;color:#aeaeb2;text-transform:uppercase;letter-spacing:0.5px;font-weight:500}
+.info-value{font-size:1.2em;font-weight:600;margin-top:4px;color:#1d1d1f}
+.bat-ok{color:#34c759}.bat-mid{color:#ff9f0a}.bat-low{color:#ff3b30}
+.status-badge{display:inline-block;padding:5px 14px;border-radius:20px;font-size:0.82em;font-weight:600}
+.status-ok{background:#e8f9ef;color:#1a7f3c}
+.status-wait{background:#fff8e6;color:#b45309}
+.status-err{background:#fff0f0;color:#cc1c1c}
+.sys-info{font-size:0.82em;color:#6e6e73;line-height:2}
+.sys-info strong{color:#1d1d1f;font-weight:600}
+.refresh-note{text-align:center;font-size:0.72em;color:#aeaeb2;margin-top:8px}
+.cfg-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:12px}
+.cfg-row label{font-size:0.85em;color:#1d1d1f;font-weight:500;flex:1}
+.cfg-row input,.cfg-row select{background:#fff;border:1.5px solid #d2d2d7;color:#1d1d1f;border-radius:10px;padding:7px 10px;width:90px;font-size:0.92em;text-align:center}
+.cfg-row input:focus,.cfg-row select:focus{outline:none;border-color:#0071e3}
+.cfg-row .cfg-hint{font-size:0.7em;color:#aeaeb2;margin-top:2px}
+.cfg-btn{background:#0071e3;color:#fff;border:none;padding:12px 24px;border-radius:12px;font-size:0.95em;cursor:pointer;width:100%;margin-top:8px;font-weight:600}
+.cfg-btn:disabled{background:#d2d2d7;cursor:default}
 .cfg-msg{text-align:center;font-size:0.85em;margin-top:10px;min-height:1.2em}
 .cfg-check{display:flex;align-items:center;gap:8px}
-.cfg-check input[type=checkbox]{width:18px;height:18px;accent-color:#16a34a}
-.sat-type{font-size:0.7em;color:#64748b;margin-left:6px}
+.cfg-check input[type=checkbox]{width:18px;height:18px;accent-color:#0071e3}
+.sat-type{font-size:0.68em;color:#aeaeb2;margin-left:6px;font-weight:400}
 @media(min-width:768px){
 .wrap{max-width:1100px}
-.bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .bottom-grid .card{margin-bottom:0}
 }
 </style>
@@ -1042,7 +1043,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <body>
 <div class="wrap">
 <div class="header">
-<h1>Smart Mleko <span id="ver"></span></h1>
+<h1>Smart Mleko <span id="ver" style="font-size:0.48em;background:#f5f5f7;color:#6e6e73;padding:2px 8px;border-radius:8px;font-weight:500;vertical-align:middle"></span></h1>
 <div class="status" id="czas">---</div>
 </div>
 
@@ -1063,7 +1064,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="card">
 <h2>Ustawienia</h2>
 <div class="cfg-row">
-<div><label>Alarm gorny</label><div class="cfg-hint">Powiadomienie gdy temp powyej</div></div>
+<div><label>Alarm gorny</label><div class="cfg-hint">Powiadomienie gdy temp powyzej</div></div>
 <div class="cfg-check"><input type="checkbox" id="maxOn" onchange="toggleMax()"><input type="number" id="cfgMax" step="0.5" style="width:75px"></div>
 </div>
 <div class="cfg-row">
@@ -1086,7 +1087,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div><label>Tryb cichy</label><div class="cfg-hint">Wycisz lagodne alerty w nocy</div></div>
 <div class="cfg-check"><input type="checkbox" id="cichyOn" onchange="toggleCichy()">
 <select id="cfgCOd" style="width:65px"><option value="0">--</option></select>
-<span style="color:#64748b">-</span>
+<span style="color:#aeaeb2">-</span>
 <select id="cfgCDo" style="width:65px"><option value="0">--</option></select></div>
 </div>
 <button class="cfg-btn" id="cfgBtn" onclick="saveConfig()">Zapisz ustawienia</button>
@@ -1096,27 +1097,27 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="card">
 <h2>Aktualizacja OTA — Matka</h2>
 <div style="margin-bottom:12px">
-<label style="font-size:0.85em;color:#94a3b8">Firmware Matki (.bin):</label>
-<input type="file" id="otaFile" accept=".bin" style="margin-top:8px;color:#e2e8f0;font-size:0.85em">
+<label style="font-size:0.85em;color:#6e6e73">Firmware Matki (.bin):</label>
+<input type="file" id="otaFile" accept=".bin" style="margin-top:8px;color:#1d1d1f;font-size:0.85em">
 </div>
-<button onclick="uploadOTA()" id="otaBtn" style="background:#2563eb;color:white;border:none;padding:12px 24px;border-radius:10px;font-size:1em;cursor:pointer;width:100%">Wgraj firmware</button>
-<div id="otaStatus" style="margin-top:12px;font-size:0.85em;color:#94a3b8;text-align:center"></div>
-<div style="background:#0f172a;border-radius:8px;height:8px;margin-top:8px;display:none" id="otaBarWrap">
-<div id="otaBar" style="background:#2563eb;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
+<button onclick="uploadOTA()" id="otaBtn" style="background:#0071e3;color:#fff;border:none;padding:12px 24px;border-radius:12px;font-size:0.95em;cursor:pointer;width:100%;font-weight:600">Wgraj firmware</button>
+<div id="otaStatus" style="margin-top:12px;font-size:0.85em;color:#6e6e73;text-align:center"></div>
+<div style="background:#f5f5f7;border-radius:8px;height:6px;margin-top:8px;display:none" id="otaBarWrap">
+<div id="otaBar" style="background:#0071e3;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
 </div>
 </div>
 
 <div class="card">
 <h2>Aktualizacja OTA — Satelita</h2>
-<div style="margin-bottom:4px;font-size:0.8em;color:#64748b">Jeden firmware dla wszystkich satelitow (ID i typ w Preferences)</div>
+<div style="margin-bottom:4px;font-size:0.8em;color:#aeaeb2">Jeden firmware dla wszystkich satelitow (ID i typ w Preferences)</div>
 <div style="margin-bottom:12px">
-<label style="font-size:0.85em;color:#94a3b8">Firmware Satelity (.bin):</label>
-<input type="file" id="otaSatFile" accept=".bin" style="margin-top:8px;color:#e2e8f0;font-size:0.85em">
+<label style="font-size:0.85em;color:#6e6e73">Firmware Satelity (.bin):</label>
+<input type="file" id="otaSatFile" accept=".bin" style="margin-top:8px;color:#1d1d1f;font-size:0.85em">
 </div>
-<button onclick="uploadOTASat()" id="otaSatBtn" style="background:#7c3aed;color:white;border:none;padding:12px 24px;border-radius:10px;font-size:1em;cursor:pointer;width:100%">Wgraj firmware Satelity</button>
-<div id="otaSatStatus" style="margin-top:12px;font-size:0.85em;color:#94a3b8;text-align:center"></div>
-<div style="background:#0f172a;border-radius:8px;height:8px;margin-top:8px;display:none" id="otaSatBarWrap">
-<div id="otaSatBar" style="background:#7c3aed;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
+<button onclick="uploadOTASat()" id="otaSatBtn" style="background:#5856d6;color:#fff;border:none;padding:12px 24px;border-radius:12px;font-size:0.95em;cursor:pointer;width:100%;font-weight:600">Wgraj firmware Satelity</button>
+<div id="otaSatStatus" style="margin-top:12px;font-size:0.85em;color:#6e6e73;text-align:center"></div>
+<div style="background:#f5f5f7;border-radius:8px;height:6px;margin-top:8px;display:none" id="otaSatBarWrap">
+<div id="otaSatBar" style="background:#5856d6;height:100%;border-radius:8px;width:0%;transition:width 0.3s"></div>
 </div>
 </div>
 </div>
@@ -1124,13 +1125,13 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#0f172a;color:#e2
 <div class="refresh-note">Odswiezanie co 5 sekund</div>
 
 <script>
-var KOLORY=['','#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399','#fb923c','#e879f9'];
-function kolorSat(id){return KOLORY[id]||'#38bdf8';}
+var KOLORY=['','#0071e3','#34c759','#ff9f0a','#ff3b30','#af52de','#5ac8fa','#ff2d55','#ffcc00'];
+function kolorSat(id){return KOLORY[id]||'#0071e3';}
 var nazwyMap={};
 function renderCzujniki(satelity){
 let c=document.getElementById('czujniki');
 if(!satelity||!satelity.length){
-c.innerHTML='<div class="card"><h2>Czujniki</h2><div style="text-align:center;color:#64748b;padding:20px">Brak polaczonych czujnikow.<br>Podlacz Satelite — pojawi sie automatycznie.</div></div>';
+c.innerHTML='<div class="card"><h2>Czujniki</h2><div style="text-align:center;color:#aeaeb2;padding:20px">Brak polaczonych czujnikow.<br>Podlacz Satelite — pojawi sie automatycznie.</div></div>';
 return;
 }
 let html='';
@@ -1143,35 +1144,34 @@ if(s.blad_czujnika){tempVal='ERR';tempClass='temp-value blad';badgeText='Blad cz
 else if(s.temperatura!==undefined){tempVal=s.temperatura.toFixed(1);badgeText='OK';badgeCls='status-badge status-ok';}
 if(s.trend!==undefined&&s.trend!==null){
 let arrow,cls;
-if(s.trend>0.1){arrow='\u2191';cls='color:#ef4444'}
-else if(s.trend<-0.1){arrow='\u2193';cls='color:#22c55e'}
-else{arrow='\u2192';cls='color:#94a3b8'}
+if(s.trend>0.1){arrow='↑';cls='color:#ff3b30'}
+else if(s.trend<-0.1){arrow='↓';cls='color:#34c759'}
+else{arrow='→';cls='color:#aeaeb2'}
 let sign=s.trend>=0?'+':'';
-trendHtml='<div style="font-size:1.2em;margin-top:8px"><span style="'+cls+'">'+arrow+' '+sign+s.trend.toFixed(1)+'\u00b0C/h</span></div>';
+trendHtml='<div style="font-size:1.1em;margin-top:6px"><span style="'+cls+'">'+arrow+' '+sign+s.trend.toFixed(1)+'°C/h</span></div>';
 }
 let fwInfo=s.fw?' v'+s.fw:'';
 let nazwaDisplay=(s.nazwa&&s.nazwa.length>0)?s.nazwa:('Czujnik #'+s.id);
 nazwyMap[s.id]=nazwaDisplay;
-html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+')" title="Zmien nazwe" style="cursor:pointer;font-size:0.55em;color:#64748b;vertical-align:middle">&#9998;</span> <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
+let kolor=s.blad_czujnika?'#ff9f0a':kolorSat(s.id);
+html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+')" title="Zmien nazwe" style="cursor:pointer;font-size:0.9em;color:#aeaeb2;vertical-align:middle">&#9998;</span> <span class="sat-type">'+typIcon+' '+typName+fwInfo+'</span></h2>';
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
-let kolor=s.blad_czujnika?'':';color:'+kolorSat(s.id);
-html+='<div class="temp-display"><span class="'+tempClass+'" style="'+kolor+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
+html+='<div class="temp-display"><span class="'+tempClass+'" style="color:'+kolor+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
 html+='<div class="info-grid">';
 if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';}
-else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#22c55e">Sieciowe</div></div>';}
+else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#34c759">Sieciowe</div></div>';}
 html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value">'+s.ostatni+'</div></div>';
 html+='</div>';
 let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty aktywne';
-let monStyle=s.tylko_monitoring?'background:#334155;color:#94a3b8':'background:#166534;color:#4ade80';
-html+='<div style="text-align:center;margin-top:10px">';
-html+='<button style="'+monStyle+';border:none;padding:5px 14px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button>';
-html+=' <button style="background:#7f1d1d;color:#fca5a5;border:none;padding:5px 12px;border-radius:8px;font-size:0.8em;cursor:pointer" onclick="usunSatelite('+s.id+',\''+nazwaDisplay+'\')">&#x2715; Usun</button>';
+let monStyle=s.tylko_monitoring?'background:#f5f5f7;color:#6e6e73;border:1px solid #d2d2d7':'background:#e8f9ef;color:#1a7f3c;border:1px solid #b7f0cd';
+html+='<div style="text-align:center;margin-top:12px">';
+html+='<button style="'+monStyle+';padding:5px 14px;border-radius:20px;font-size:0.78em;cursor:pointer;font-weight:600" onclick="toggleMonitoring('+s.id+','+s.tylko_monitoring+')">'+monLabel+'</button>';
+html+=' <button style="background:#fff0f0;color:#cc1c1c;border:1px solid #ffc9c9;padding:5px 12px;border-radius:20px;font-size:0.78em;cursor:pointer;font-weight:600" onclick="usunSatelite('+s.id+',''+nazwaDisplay+'')">&#x2715; Usun</button>';
 html+='</div>';
-html+='<canvas id="chart_'+s.id+'" height="150" style="width:100%;margin-top:16px;background:#0f172a;border-radius:10px"></canvas>';
+html+='<canvas id="chart_'+s.id+'" style="width:100%;margin-top:16px;border-radius:12px"></canvas>';
 html+='</div>';
 });
 c.innerHTML=html;
-// Rysuj wykresy
 loadCharts();
 }
 
@@ -1182,7 +1182,7 @@ let cv=document.getElementById('chart_'+sat.id);
 if(!cv||!sat.dane||sat.dane.length<2)return;
 let ctx=cv.getContext('2d');
 let w=cv.width=cv.offsetWidth;
-let h=cv.height=window.innerWidth>=768?280:150;
+let h=cv.height=window.innerWidth>=768?280:160;
 let d=sat.dane;
 let vmin=999,vmax=-999;
 d.forEach(function(p){if(p.v<vmin)vmin=p.v;if(p.v>vmax)vmax=p.v});
@@ -1191,17 +1191,30 @@ if(vmax-vmin<1){vmin-=0.5;vmax+=0.5}
 let tmin=d[0].t,tmax=d[d.length-1].t;
 if(tmax===tmin)tmax=tmin+1;
 ctx.clearRect(0,0,w,h);
-// Siatka
-ctx.strokeStyle='#1e293b';ctx.lineWidth=1;
+ctx.fillStyle='#fafafa';ctx.fillRect(0,0,w,h);
+ctx.strokeStyle='#efefef';ctx.lineWidth=1;
 for(let i=0;i<=4;i++){
 let y=h-((i/4)*(h-30))-15;
 ctx.beginPath();ctx.moveTo(40,y);ctx.lineTo(w-10,y);ctx.stroke();
 let val=vmin+((i/4)*(vmax-vmin));
-ctx.fillStyle='#64748b';ctx.font='11px sans-serif';ctx.textAlign='right';
+ctx.fillStyle='#aeaeb2';ctx.font='11px -apple-system,sans-serif';ctx.textAlign='right';
 ctx.fillText(val.toFixed(1),36,y+4);
 }
-// Linia
-ctx.strokeStyle=kolorSat(sat.id);ctx.lineWidth=2;
+var c=kolorSat(sat.id);
+var cr=parseInt(c.slice(1,3),16),cg=parseInt(c.slice(3,5),16),cb=parseInt(c.slice(5,7),16);
+ctx.beginPath();
+d.forEach(function(p,i){
+let x=40+((p.t-tmin)/(tmax-tmin))*(w-50);
+let y=h-15-((p.v-vmin)/(vmax-vmin))*(h-30);
+if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+});
+ctx.lineTo(40+((d[d.length-1].t-tmin)/(tmax-tmin))*(w-50),h-15);
+ctx.lineTo(40,h-15);ctx.closePath();
+var grad=ctx.createLinearGradient(0,0,0,h);
+grad.addColorStop(0,'rgba('+cr+','+cg+','+cb+',0.15)');
+grad.addColorStop(1,'rgba('+cr+','+cg+','+cb+',0)');
+ctx.fillStyle=grad;ctx.fill();
+ctx.strokeStyle=kolorSat(sat.id);ctx.lineWidth=1.5;
 ctx.beginPath();
 d.forEach(function(p,i){
 let x=40+((p.t-tmin)/(tmax-tmin))*(w-50);
@@ -1209,8 +1222,7 @@ let y=h-15-((p.v-vmin)/(vmax-vmin))*(h-30);
 if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
 });
 ctx.stroke();
-// Oś czasu
-ctx.fillStyle='#64748b';ctx.font='10px sans-serif';ctx.textAlign='center';
+ctx.fillStyle='#aeaeb2';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='center';
 [0,0.25,0.5,0.75,1].forEach(function(f){
 let t=tmin+f*(tmax-tmin);
 let date=new Date(t*1000);
@@ -1294,10 +1306,8 @@ document.getElementById('otaSatBarWrap').style.display='block';
 let st=document.getElementById('otaSatStatus');
 let bar=document.getElementById('otaSatBar');
 try{
-// Begin
 let r=await fetch('/ota/satelita/begin?size='+f.size,{method:'POST'});
 if(!r.ok)throw new Error('begin failed');
-// Chunked upload 8KB z delay
 let chunkSize=8192;
 let sent=0;
 let buf=await f.arrayBuffer();
@@ -1312,7 +1322,6 @@ bar.style.width=p+'%';
 st.textContent=p+'% ('+Math.round(sent/1024)+'/'+Math.round(f.size/1024)+' KB)';
 await new Promise(r=>setTimeout(r,50));
 }
-// Poczekaj na ostatni body callback przed finish
 await new Promise(r=>setTimeout(r,300));
 let fr=await fetch('/ota/satelita/finish',{method:'POST'});
 let fsize=await fr.text();
@@ -1327,7 +1336,6 @@ st.textContent='BLAD: '+e.message;
 btn.disabled=false;btn.textContent='Wgraj firmware Satelity';
 }
 
-// === Ustawienia ===
 (function(){
 let s=document.getElementById('cfgCOd');
 let e=document.getElementById('cfgCDo');
@@ -1383,12 +1391,12 @@ cichy_do:document.getElementById('cichyOn').checked?parseInt(document.getElement
 fetch('/api/ustawienia',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
 .then(r=>{
 document.getElementById('cfgMsg').textContent=r.ok?'Zapisano!':'Blad';
-document.getElementById('cfgMsg').style.color=r.ok?'#4ade80':'#fca5a5';
+document.getElementById('cfgMsg').style.color=r.ok?'#1a7f3c':'#cc1c1c';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
 setTimeout(()=>{document.getElementById('cfgMsg').textContent=''},3000);
 }).catch(()=>{
 document.getElementById('cfgMsg').textContent='Blad polaczenia';
-document.getElementById('cfgMsg').style.color='#fca5a5';
+document.getElementById('cfgMsg').style.color='#cc1c1c';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
 })}
 </script>
