@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "4.8"
+#define FW_VERSION "4.9"
 
 // === WiFi ===
 
@@ -25,6 +25,7 @@
 #define WIFI_CREDS_PATH "/wifi.json"
 #define NAZWY_PATH "/nazwy.json"
 #define MONITORING_PATH "/monitoring.json"
+#define HISTORIA_PATH_PREFIX "/hist_"
 
 // Cache nazw i flag satelit indexed by ID (0 nieużywany, IDs 1-8)
 #define MAX_SAT_ID 9
@@ -125,6 +126,10 @@ bool ota_write_pending = false;
 
 AsyncWebServer server(80);
 
+// Forward declarations
+void wczytajHistorie(SatelitaInfo *s);
+void zapiszHistorie(SatelitaInfo *s);
+
 // === Pomocnicze — satelity ===
 
 SatelitaInfo* znajdzSatelite(uint8_t id) {
@@ -153,6 +158,7 @@ SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac
     }
     s->tylko_monitoring = (id > 0 && id < MAX_SAT_ID) ? satellite_monitoring[id] : false;
     for (int i = 0; i < MAX_HISTORIA_PER; i++) s->historia[i].pusty = true;
+    wczytajHistorie(s);
     Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
         id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return s;
@@ -189,6 +195,54 @@ void dodajDoHistorii(SatelitaInfo *s, float temp) {
     s->historia[s->hist_idx].pusty = false;
     s->hist_idx = (s->hist_idx + 1) % MAX_HISTORIA_PER;
     if (s->hist_count < MAX_HISTORIA_PER) s->hist_count++;
+}
+
+// === Historia satelit (LittleFS) ===
+
+void zapiszHistorie(SatelitaInfo *s) {
+    char path[24];
+    snprintf(path, sizeof(path), "%s%d.json", HISTORIA_PATH_PREFIX, s->id);
+    File f = LittleFS.open(path, "w");
+    if (!f) return;
+    f.write('[');
+    bool first = true;
+    int start = (s->hist_count == MAX_HISTORIA_PER) ? s->hist_idx : 0;
+    for (int i = 0; i < s->hist_count; i++) {
+        int idx = (start + i) % MAX_HISTORIA_PER;
+        if (s->historia[idx].pusty) continue;
+        if (!first) f.write(',');
+        char buf[32];
+        snprintf(buf, sizeof(buf), "{\"v\":%.2f,\"t\":%lu}",
+            s->historia[idx].temperatura,
+            (unsigned long)s->historia[idx].czas_unix);
+        f.print(buf);
+        first = false;
+    }
+    f.write(']');
+    f.close();
+    Serial.printf("[FS] Historia #%d zapisana\n", s->id);
+}
+
+void wczytajHistorie(SatelitaInfo *s) {
+    char path[24];
+    snprintf(path, sizeof(path), "%s%d.json", HISTORIA_PATH_PREFIX, s->id);
+    File f = LittleFS.open(path, "r");
+    if (!f) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, f)) { f.close(); return; }
+    f.close();
+    JsonArray arr = doc.as<JsonArray>();
+    s->hist_idx = 0;
+    s->hist_count = 0;
+    for (JsonObject entry : arr) {
+        if (s->hist_count >= MAX_HISTORIA_PER) break;
+        s->historia[s->hist_idx].temperatura = entry["v"] | 0.0f;
+        s->historia[s->hist_idx].czas_unix   = entry["t"] | (uint32_t)0;
+        s->historia[s->hist_idx].pusty       = false;
+        s->hist_idx = (s->hist_idx + 1) % MAX_HISTORIA_PER;
+        s->hist_count++;
+    }
+    Serial.printf("[FS] Historia #%d wczytana (%d wpisow)\n", s->id, s->hist_count);
 }
 
 // === Nazwy satelit (LittleFS) ===
@@ -1944,6 +1998,7 @@ void loop() {
                     sprawdzAlerty(s);
                     if (!s->pomiar.blad_czujnika) {
                         dodajDoHistorii(s, s->pomiar.temperatura);
+                        if (s->hist_idx % 4 == 0) zapiszHistorie(s);
                     }
                 }
             }
