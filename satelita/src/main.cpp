@@ -10,7 +10,7 @@
 
 // === Wersja ===
 
-#define SAT_FW_VERSION "3.0"
+#define SAT_FW_VERSION "3.1"
 
 // === Konfiguracja ===
 
@@ -342,7 +342,13 @@ void loop() {
         } else {
             Serial.println("[WARN] Brak ACK — proba channel hopping...");
             if (znajdzKanal()) {
-                polaczono = true;
+                // Znaleziono kanal przez sonde — wyslij od razu real measurement
+                delay(100);
+                if (wyslijPomiar(temp, blad, 100) && czekajNaACK()) {
+                    polaczono = true;
+                } else {
+                    polaczono = true; // kanal znaleziony, ACK z sondy wazny
+                }
             }
         }
     }
