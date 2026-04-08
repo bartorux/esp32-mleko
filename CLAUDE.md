@@ -9,9 +9,7 @@ Smart Mleko — ESP-NOW-based milk temperature monitoring system with star topol
 ## Architecture
 
 - **Matka** (`matka/`): ESP32-S3 N16R8 hub running 24/7. Receives ESP-NOW data from Satelita, serves web dashboard at `http://mleko.local`, sends Telegram alerts, handles WiFi captive portal, NTP sync, OTA updates. Single-file firmware (`src/main.cpp`) with inline HTML/CSS/JS for both captive portal and dashboard.
-- **Satelita** (`satelita/`): DS18B20 temperature sensor, two PlatformIO environments. One universal firmware for all satellites.
-  - `esp32_bat` env: WEMOS D1 ESP32 (board `lolin_d32`) for battery variant — **always use this**
-  - `esp32c3_zas` env: ESP32-C3 Super Mini for mains variant
+- **Satelita** (`satelita/`): DS18B20 temperature sensor. Currently deployed as mains-only (ESP32-C3 Super Mini, `esp32c3_zas` env). Battery variant (`esp32_bat`, WEMOS D1 ESP32) exists in code but not deployed.
   - `ID_CZUJNIKA` and `TYP_ZASILANIA` stored in **Preferences (NVS)**, not `#define` — survive OTA updates
   - First USB flash sets ID and type; all subsequent OTA updates use the same `.bin` for every satellite
   - `TYP_ZASILANIA`: `1` = battery (18650 + deep sleep), `2` = mains (continuous loop)
@@ -26,7 +24,7 @@ Smart Mleko — ESP-NOW-based milk temperature monitoring system with star topol
 ```bash
 # Build
 cd matka && pio run -e esp32s3
-cd satelita && pio run -e esp32_bat
+cd satelita && pio run -e esp32c3_zas
 
 # Upload (Matka connected via USB — port changes after each reset!)
 ls /dev/cu.usb*       # find current port first
@@ -36,16 +34,7 @@ cd matka && pio run -t upload   # requires BOOT+EN bootloader mode
 cd matka && pio run -t uploadfs
 ```
 
-Satelita bateriowa (esp32_bat) — flash przez Raspberry Pi (`ssh admin@pi.local`, hasło: `admin`):
-```bash
-# Kopiuj na Pi
-scp .pio/build/esp32_bat/bootloader.bin .pio/build/esp32_bat/partitions.bin satelita/firmware.bin "admin@pi.local:/home/admin/"
-
-# Flash (chip esp32, nie esp32c3!)
-ssh admin@pi.local "~/esp/bin/esptool.py --chip esp32 --port /dev/ttyUSB0 erase_flash && ~/esp/bin/esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 write_flash 0x1000 bootloader.bin 0x8000 partitions.bin 0x10000 firmware.bin"
-```
-
-Satelita zasilaczowa C3 Super Mini (esp32c3_zas) — flash bezpośrednio USB-C do Maca:
+Satelita zasilaczowa C3 Super Mini (esp32c3_zas) — flash USB-C bezpośrednio do Maca:
 ```bash
 cd satelita && pio run -t upload -e esp32c3_zas
 ```
@@ -55,8 +44,7 @@ Logi satelity przez Pi (persistent — reconnectuje po deep sleep):
 ssh admin@pi.local "while true; do stty -F /dev/ttyUSB0 115200 raw 2>/dev/null; cat /dev/ttyUSB0 2>/dev/null; sleep 1; done"
 ```
 
-**OTA bin esp32_bat**: `satelita/firmware.bin` — auto-kopiowany przez `satelita/copy_firmware.py` po `pio run -e esp32_bat`.
-**OTA bin esp32c3_zas**: `.pio/build/esp32c3_zas/firmware.bin` — `copy_firmware.py` kopiuje tylko esp32_bat, dla C3 wskaż ręcznie.
+**OTA bin satelita (C3)**: `satelita/firmware.bin` — `copy_firmware.py` kopiuje `.pio/build/esp32c3_zas/firmware.bin` po `pio run -e esp32c3_zas`. Ten plik wgrywany przez dashboard mleko.local → OTA Satelity.
 **Matka self-OTA**: `matka/copy_firmware.py` kopiuje zbudowane `.bin` do `matka/firmware.bin` — to plik wgrywany przez `POST /ota/matka` z dashboardu.
 
 **Uwaga na port Matki**: `upload_port` w `matka/platformio.ini` jest hardcoded (`/dev/cu.usbmodem212301`) — zmień jeśli port się różni po resecie.
@@ -79,10 +67,13 @@ Both devices share identical packed structs — keep them in sync when modifying
 - **All UI text and variable names are in Polish**
 - **ESP-NOW channel**: Matka inits ESP-NOW *after* WiFi.begin() so the channel matches the router. Satelita stores last successful channel in RTC RAM (`ostatni_kanal`) as a hint — tries it first on wake, then falls back to full channel hopping (1–13)
 - **MAC addresses**: Matka MAC is hardcoded in `satelita/src/main.cpp:36` (`adresMatki[]` = `{0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8}`). **Must update when replacing Matka hardware** — read MAC from Serial Monitor after first boot. Satelita MACs are auto-learned on first ESP-NOW receive (auto-discovery)
-- **Multi-satellite**: Matka supports up to `MAX_SATELITY` (8) satellites. Each tracked in `SatelitaInfo` struct array with: id, MAC, type (battery/mains), last measurement, timestamps, OTA state. Satellites auto-register on first message.
+- **Multi-satellite**: Matka supports up to `MAX_SATELITY` (8) satellites. Each tracked in `SatelitaInfo` struct array with: id, MAC, type (battery/mains), last measurement, timestamps, OTA state, `ostatni_alert_temp_high`/`ostatni_alert_temp_low` (per-satellite cooldown timestamps). Satellites auto-register on first message.
+- **Alert cooldown**: Temperature alerts (high/low) use per-satellite `alert_cykl_s` cooldown (default 900s/15min), configurable from dashboard. Sensor error / battery / rate alerts use global `TELEGRAM_COOLDOWN` (5 min). `/cichy_temp` silences only temperature alerts for 24h; error alerts remain active.
+- **Heartbeat timeout**: `3 × interwal_zasil_s` (mains) or `3 × interwal_s` (battery), minimum 5 min. NOT hardcoded to 5 min.
+- **System log ring buffer**: `addLog()` function writes timestamped entries to RAM ring buffer (`LOG_BUF_SIZE=50` entries, `LOG_MAX_LEN=100` chars each, ~5KB total). Also prints to Serial. Exposed via `GET /api/log` and shown as expandable panel at dashboard bottom.
 - **Matka is a single file** (`matka/src/main.cpp`) — dashboard HTML, captive portal HTML, API handlers, Telegram bot, ESP-NOW callbacks, and config persistence all live in one file
-- **Build flags**: Matka uses `ARDUINO_USB_CDC_ON_BOOT=1`, `BOARD_HAS_PSRAM`, and `board_build.arduino.memory_type = qio_opi` (required for OPI PSRAM on S3 N16R8). Satelita does NOT use `ARDUINO_USB_CDC_ON_BOOT` — `esp32_bat` uses `-DPLATFORM_ESP32`, `esp32c3_zas` uses `-DPLATFORM_C3`
-- **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `prog_wzrost`, `interwal`, `interwal_zasil`, `cichy_od`, `cichy_do`. Satelita namespace `"satelita"` — keys: `id`, `typ`
+- **Build flags**: Matka uses `ARDUINO_USB_CDC_ON_BOOT=1`, `BOARD_HAS_PSRAM`, and `board_build.arduino.memory_type = qio_opi` (required for OPI PSRAM on S3 N16R8). Satelita C3: `esp32c3_zas` uses `-DPLATFORM_C3`
+- **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `prog_wzrost`, `interwal`, `interwal_zasil`, `cichy_od`, `cichy_do`, `alert_cykl` (alert repeat interval in seconds, default 900). Satelita namespace `"satelita"` — keys: `id`, `typ`
 - **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/nazwy.json` (satellite display names), `/monitoring.json` (only_monitoring flags, only `true` entries stored), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null), `/hist_<id>` (per-satellite ring buffer, e.g. `/hist_1`, `/hist_2` — loaded/saved by `wczytajHistorie`/`zapiszHistorie`)
 - **Satellite names**: Stored in `satellite_names[MAX_SAT_ID][32]` global (indexed by ID). Loaded at boot from LittleFS, applied to `SatelitaInfo.nazwa` when satellite registers. Editable via `POST /api/satelita/nazwa` and pencil icon in dashboard.
 - **Satellite removal**: `POST /api/satelita/usun` removes satellite from the in-memory `satelity[]` array and calls `esp_now_del_peer()`. Names and `tylko_monitoring` flags are preserved in LittleFS — auto-restored when satellite reconnects. `satelity[]` is NOT persisted across reboots by design.
@@ -98,6 +89,7 @@ POST /api/satelita/nazwa       — set satellite display name (JSON: {id, nazwa}
 POST /api/satelita/monitoring  — set monitoring-only flag (JSON: {id, tylko_monitoring})
 POST /api/satelita/usun        — remove satellite from tracking list (JSON: {id})
 POST /api/wifi-reset       — delete WiFi creds, restart to AP mode
+GET  /api/log              — system log ring buffer (last 50 entries, JSON array of strings)
 POST /ota/matka            — multipart firmware upload for Matka
 POST /ota/satelita/begin   — start chunked upload session (?size=XXXXX)
 POST /ota/satelita/chunk   — upload 8KB chunk (raw binary body)
@@ -107,9 +99,9 @@ GET  /ota/satelita.bin     — serve stored satellite firmware (for OTA download
 
 ## Telegram Commands
 
-`/status`, `/historia`, `/srednia`, `/raport`, `/set_max <val>`, `/set_min <val>`, `/interwal <min>`, `/cichy <od> <do>`, `/ustawienia`, `/wifi-reset`, `/pomoc`
+`/status`, `/historia`, `/srednia`, `/raport`, `/set_max <val>`, `/set_min <val>`, `/interwal <min>`, `/cichy <od> <do>`, `/cichy_temp` (silence temp alerts 24h), `/cichy_temp off` (resume), `/ustawienia`, `/wifi-reset`, `/pomoc`
 
-## OTA Flow (Satelita) — WORKING as of v2.8
+## OTA Flow (Satelita) — WORKING as of v3.1
 
 **Upload (browser → Matka):**
 1. JS splits `.bin` into 8KB chunks, calls `begin?size=N` → Matka allocates `ps_malloc(N)` in PSRAM (`ota_buf`)
@@ -138,8 +130,8 @@ GET  /ota/satelita.bin     — serve stored satellite firmware (for OTA download
 
 ## Firmware versions
 
-- **Matka**: `FW_VERSION "5.0"` (`matka/src/main.cpp:19`)
-- **Satelita**: `SAT_FW_VERSION "2.8"` (`satelita/src/main.cpp:13`)
+- **Matka**: `FW_VERSION "5.4.2"` (`matka/src/main.cpp`)
+- **Satelita**: `SAT_FW_VERSION "3.1"` (`satelita/src/main.cpp:13`)
 
 Wersje widoczne w `/api/status` i wyświetlane w dashboardzie.
 
