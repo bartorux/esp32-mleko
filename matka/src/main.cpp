@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.3"
+#define FW_VERSION "5.4"
 
 // === WiFi ===
 
@@ -130,9 +130,39 @@ bool ota_write_pending = false;
 
 AsyncWebServer server(80);
 
+// === Ring buffer logów ===
+
+#define LOG_BUF_SIZE 50
+#define LOG_MAX_LEN  100
+char log_buf[LOG_BUF_SIZE][LOG_MAX_LEN];
+int  log_idx   = 0;
+int  log_count = 0;
+
 // Forward declarations
 void wczytajHistorie(SatelitaInfo *s);
 void zapiszHistorie(SatelitaInfo *s);
+
+// === Log ===
+
+void addLog(const char *fmt, ...) {
+    char tmp[LOG_MAX_LEN - 12];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, args);
+    va_end(args);
+
+    struct tm t;
+    char line[LOG_MAX_LEN];
+    if (getLocalTime(&t)) {
+        snprintf(line, sizeof(line), "[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, tmp);
+    } else {
+        snprintf(line, sizeof(line), "[--:--:--] %s", tmp);
+    }
+    strlcpy(log_buf[log_idx], line, LOG_MAX_LEN);
+    log_idx = (log_idx + 1) % LOG_BUF_SIZE;
+    if (log_count < LOG_BUF_SIZE) log_count++;
+    Serial.println(line);
+}
 
 // === Pomocnicze — satelity ===
 
@@ -163,7 +193,7 @@ SatelitaInfo* znajdzLubDodajSatelite(uint8_t id, uint8_t typ, const uint8_t *mac
     s->tylko_monitoring = (id > 0 && id < MAX_SAT_ID) ? satellite_monitoring[id] : false;
     for (int i = 0; i < MAX_HISTORIA_PER; i++) s->historia[i].pusty = true;
     wczytajHistorie(s);
-    Serial.printf("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+    addLog("[SAT] Nowa satelita #%d typ=%d MAC=%02X:%02X:%02X:%02X:%02X:%02X",
         id, s->typ, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return s;
 }
@@ -176,7 +206,7 @@ void usunSatelite(uint8_t id) {
                 satelity[j] = satelity[j+1];
             }
             ile_satelit--;
-            Serial.printf("[SAT] Satelita #%d usunieta\n", id);
+            addLog("[SAT] Satelita #%d usunieta", id);
             return;
         }
     }
@@ -367,14 +397,13 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         memcpy(&s->pomiar, &msg, sizeof(struct_message));
         s->ostatni_czas = millis();
         s->aktywna = true;
-        Serial.printf("[ESP-NOW] Satelita #%d od %s: %.1f°C bat=%d%%\n",
-            msg.id_czujnika, macToString(mac).c_str(),
-            msg.temperatura, msg.bateria_procent);
+        addLog("[ESP-NOW] Satelita #%d: %.1f°C bat=%d%%",
+            msg.id_czujnika, msg.temperatura, msg.bateria_procent);
         // Reset OTA — gdy satelita wróciła po restarcie (URL już był wysłany)
         if (s->ota_pending && s->ota_url_wyslany) {
             s->ota_pending = false;
             s->ota_url_wyslany = false;
-            Serial.printf("[OTA] Satelita #%d — flaga wyczyszczona\n", s->id);
+            addLog("[OTA] Satelita #%d — flaga wyczyszczona", s->id);
         }
     }
 
@@ -383,8 +412,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 }
 
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
-    Serial.printf("[ESP-NOW] ACK: %s\n",
-        status == ESP_NOW_SEND_SUCCESS ? "OK" : "BLAD");
+    if (status != ESP_NOW_SEND_SUCCESS)
+        addLog("[ESP-NOW] ACK: BLAD");
 }
 
 // === ACK ===
@@ -463,9 +492,9 @@ void wyslijTelegram(const String &msg) {
 
     int code = http.POST(body);
     if (code > 0) {
-        Serial.printf("[Telegram] Wyslano (HTTP %d)\n", code);
+        addLog("[Telegram] Wyslano (HTTP %d)", code);
     } else {
-        Serial.printf("[Telegram] Blad: %s\n", http.errorToString(code).c_str());
+        addLog("[Telegram] Blad: %s", http.errorToString(code).c_str());
     }
     http.end();
 }
@@ -932,7 +961,7 @@ void sprawdzTelegram() {
                 if (chat_id == TELEGRAM_CHAT_ID) {
                     String tekst = upd["message"]["text"].as<String>();
                     if (tekst.startsWith("/")) {
-                        Serial.printf("[Telegram] Komenda: %s\n", tekst.c_str());
+                        addLog("[Telegram] Komenda: %s", tekst.c_str());
                         obsluzKomende(tekst);
                     }
                 }
@@ -1343,6 +1372,18 @@ var el=document.getElementById('ago_'+s.id);if(el)el.textContent=s.ostatni;
 var newKey=satKey(d.satelity);
 if(newKey!==_lastSatKey){_lastSatKey=newKey;renderCzujniki(d.satelity);}
 }).catch(e=>console.log(e));
+if(_logOpen)odswiezLogi();
+}
+var _logOpen=false;
+document.getElementById('logDetails').addEventListener('toggle',function(){
+_logOpen=this.open;if(_logOpen)odswiezLogi();
+});
+function odswiezLogi(){
+fetch('/api/log').then(r=>r.json()).then(function(lines){
+var pre=document.getElementById('logPre');
+pre.textContent=lines.join('\n');
+pre.scrollTop=pre.scrollHeight;
+}).catch(function(){document.getElementById('logPre').textContent='Blad pobierania logow';});
 }
 update();
 setInterval(update,5000);
@@ -1500,6 +1541,15 @@ document.getElementById('cfgMsg').style.color='#cc1c1c';
 btn.disabled=false;btn.textContent='Zapisz ustawienia';
 })}
 </script>
+<div class="card" style="margin-top:16px">
+<details id="logDetails">
+<summary style="cursor:pointer;font-size:1em;font-weight:600;color:#1d1d1f;padding:4px 0;user-select:none">Logi systemowe</summary>
+<div style="margin-top:12px">
+<button onclick="odswiezLogi()" style="font-size:0.8em;padding:6px 14px;border-radius:8px;border:1px solid #d1d1d6;background:#f5f5f7;cursor:pointer;margin-bottom:8px">Odswiez</button>
+<pre id="logPre" style="font-size:0.75em;line-height:1.5;color:#3a3a3c;background:#f5f5f7;border-radius:8px;padding:12px;overflow-x:auto;white-space:pre-wrap;max-height:300px;overflow-y:auto;margin:0"></pre>
+</div>
+</details>
+</div>
 </div>
 </body></html>
 )rawliteral";
@@ -1785,6 +1835,26 @@ void setupServer() {
         }
     );
 
+    // Logi systemowe
+    server.on("/api/log", HTTP_GET, [](AsyncWebServerRequest *req) {
+        String json = "[";
+        int start = (log_count == LOG_BUF_SIZE) ? log_idx : 0;
+        for (int i = 0; i < log_count; i++) {
+            int idx = (start + i) % LOG_BUF_SIZE;
+            if (i > 0) json += ",";
+            json += "\"";
+            for (int j = 0; log_buf[idx][j]; j++) {
+                char c = log_buf[idx][j];
+                if (c == '"') json += "\\\"";
+                else if (c == '\\') json += "\\\\";
+                else json += c;
+            }
+            json += "\"";
+        }
+        json += "]";
+        req->send(200, "application/json", json);
+    });
+
     // WiFi reset
     server.on("/api/wifi-reset", HTTP_POST, [](AsyncWebServerRequest *req) {
         usunWiFiCreds();
@@ -1799,7 +1869,7 @@ void setupServer() {
             bool ok = !Update.hasError();
             req->send(200, "text/plain", ok ? "OK" : "BLAD");
             if (ok) {
-                Serial.println("[OTA] Sukces! Restart...");
+                addLog("[OTA] Sukces! Restart...");
                 delay(500);
                 ESP.restart();
             }
@@ -1835,7 +1905,7 @@ void setupServer() {
             return;
         }
         int totalSize = req->getParam("size")->value().toInt();
-        Serial.printf("[OTA-SAT] Begin: %d bajtow\n", totalSize);
+        addLog("[OTA-SAT] Begin: %d bajtow", totalSize);
         if (ota_buf) { free(ota_buf); ota_buf = nullptr; }
         ota_buf = (uint8_t *)ps_malloc(totalSize);
         if (!ota_buf) {
@@ -1865,14 +1935,14 @@ void setupServer() {
             return;
         }
         if (ota_buf_offset != ota_buf_size) {
-            Serial.printf("[OTA-SAT] BLAD: niepelny upload %d / %d\n", ota_buf_offset, ota_buf_size);
+            addLog("[OTA-SAT] BLAD: niepelny upload %d / %d", ota_buf_offset, ota_buf_size);
             free(ota_buf); ota_buf = nullptr; ota_buf_offset = 0; ota_buf_size = 0;
             req->send(400, "text/plain", "Niepelny upload: " + String(ota_buf_offset) + " / " + String(ota_buf_size));
             return;
         }
         size_t fileSize = ota_buf_offset;
         ota_write_pending = true;
-        Serial.printf("[OTA-SAT] Finish: %d bajtow — zapis w tle\n", fileSize);
+        addLog("[OTA-SAT] Finish: %d bajtow — zapis w tle", fileSize);
         req->send(200, "text/plain", String(fileSize));
     });
 
@@ -1941,10 +2011,10 @@ bool connectWiFi(const char *ssid, const char *pass) {
     }
     if (WiFi.status() == WL_CONNECTED) {
         ip_adres = WiFi.localIP().toString();
-        Serial.printf("\n[OK] WiFi polaczone! IP: %s\n", ip_adres.c_str());
+        addLog("[OK] WiFi polaczone! IP: %s", ip_adres.c_str());
         return true;
     }
-    Serial.println("\n[BLAD] WiFi nie polaczone!");
+    addLog("[BLAD] WiFi nie polaczone!");
     return false;
 }
 
@@ -1959,7 +2029,7 @@ void setup() {
 
     // LittleFS
     if (!LittleFS.begin(true)) {
-        Serial.println("[FS] LittleFS mount failed!");
+        addLog("[FS] LittleFS mount failed!");
     }
     wczytajNazwy();
     wczytajMonitoring();
@@ -2004,7 +2074,7 @@ void setup() {
     if (ntp_proby < 10) {
         Serial.printf("[OK] NTP: %s\n", pobierzCzas().c_str());
     } else {
-        Serial.println("[WARN] Brak synchronizacji NTP!");
+        addLog("[WARN] Brak synchronizacji NTP!");
     }
 
     // mDNS
@@ -2023,7 +2093,7 @@ void setup() {
     uint8_t kanal;
     wifi_second_chan_t second;
     esp_wifi_get_channel(&kanal, &second);
-    Serial.printf("[OK] ESP-NOW na kanale %d\n", kanal);
+    addLog("[OK] ESP-NOW na kanale %d", kanal);
 
     // Serwer WWW
     setupServer();
@@ -2043,7 +2113,7 @@ void setup() {
 void loop() {
     // Zapis PSRAM → LittleFS w kawałkach żeby nie blokować watchdoga
     if (ota_write_pending && ota_buf && ota_buf_offset > 0) {
-        Serial.printf("[OTA-SAT] Zapisuje %d bajtow do LittleFS...\n", ota_buf_offset);
+        addLog("[OTA-SAT] Zapisuje %d bajtow do LittleFS...", ota_buf_offset);
         LittleFS.mkdir("/ota");
         LittleFS.remove("/ota/satelita.bin");
         File f = LittleFS.open("/ota/satelita.bin", "w");
@@ -2057,10 +2127,10 @@ void loop() {
                 delay(1);
             }
             f.close();
-            Serial.printf("[OTA-SAT] Zapisano %d bajtow — flaga OTA dla %d satelitow\n", ota_buf_offset, ile_satelit);
+            addLog("[OTA-SAT] Zapisano %d bajtow — flaga OTA dla %d satelitow", ota_buf_offset, ile_satelit);
             for (int i = 0; i < ile_satelit; i++) satelity[i].ota_pending = true;
         } else {
-            Serial.println("[OTA-SAT] BLAD otwarcia pliku!");
+            addLog("[OTA-SAT] BLAD otwarcia pliku!");
         }
         // NIE zwalniamy ota_buf — serwujemy bezposrednio z PSRAM (szybsze, bez granic blokow LittleFS)
         ota_write_pending = false;
@@ -2082,7 +2152,7 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
         if (wifi_utracone == 0) {
             wifi_utracone = millis();
-            Serial.println("[WiFi] Polaczenie utracone!");
+            addLog("[WiFi] Polaczenie utracone!");
         } else if (millis() - wifi_utracone > 60000) {
             Serial.println("[WiFi] Brak WiFi >60s — restart");
             ESP.restart();
