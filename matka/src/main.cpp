@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.4.1"
+#define FW_VERSION "5.4.2"
 
 // === WiFi ===
 
@@ -397,8 +397,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         memcpy(&s->pomiar, &msg, sizeof(struct_message));
         s->ostatni_czas = millis();
         s->aktywna = true;
-        addLog("[ESP-NOW] Satelita #%d: %.1f°C bat=%d%%",
-            msg.id_czujnika, msg.temperatura, msg.bateria_procent);
+        addLog("[ESP-NOW] Satelita #%d: %.1f°C",
+            msg.id_czujnika, msg.temperatura);
         // Reset OTA — gdy satelita wróciła po restarcie (URL już był wysłany)
         if (s->ota_pending && s->ota_url_wyslany) {
             s->ota_pending = false;
