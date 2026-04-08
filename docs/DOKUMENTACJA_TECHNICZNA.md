@@ -1,9 +1,9 @@
 # DOKUMENTACJA TECHNICZNA: Smart Mleko ESP-NOW
 
 **Projekt:** Smart Mleko — System monitorowania temperatury mleka oparte o ESP-NOW  
-**Wersja dokumentacji:** 2.0  
+**Wersja dokumentacji:** 2.1  
 **Data:** 2026-04-08  
-**Status:** Produkcyjny (Matka v5.1, Satelita v3.0)  
+**Status:** Produkcyjny (Matka v5.3, Satelita v3.0)  
 **Typ:** Dokumentacja techniczna dla developerów
 
 ---
@@ -605,20 +605,25 @@ void wyslijACK(SatelitaInfo *s) {
 
 ### Alerty
 
-| Alert | Warunek | Typ | Przez cichy |
-|-------|---------|-----|------------|
-| Alarm max | temp > prog_max | Krytyczny | TAK |
-| Alarm min | temp < prog_min | Krytyczny | TAK |
-| Szybki wzrost | ΔT/Δh > prog_wzrostu | Krytyczny | TAK |
-| Brak sygnału | >2h bez wiadomości | Krytyczny | TAK |
-| Błąd DS18B20 | blad_czujnika=true | Krytyczny | TAK |
-| Brak NTP | !getLocalTime() | Krytyczny | TAK |
-| Bateria <15% | bateria_procent < 15 | Łagodny | NIE |
-| Bateria <5% | bateria_procent < 5 | Krytyczny | TAK |
+| Alert | Warunek | Cooldown | Dotyczy cichy_temp |
+|-------|---------|----------|-------------------|
+| Alarm max | temp > prog_max | `alert_cykl_s` per-satelita | TAK |
+| Alarm min | temp < prog_min | `alert_cykl_s` per-satelita | TAK |
+| Błąd DS18B20 | blad_czujnika=true | Globalny 5 min | NIE |
+| Bateria <5% | bateria_procent < 5 | Globalny 5 min | NIE |
+| Bateria <15% | bateria_procent < 15 | Globalny 5 min | NIE |
+| Szybki wzrost | ΔT/Δh > prog_wzrost | Globalny 5 min | NIE |
+| Brak sygnału | >3× interwal bez wiadomości | Globalny 5 min | NIE |
 
-**Anti-spam**:
-- Łagodne: max raz na 12h
-- Krytyczne: co 1h dopóki problem trwa
+**System alertów temperaturowych** (v5.3):
+- Alerty temp (max/min) mają własny per-satelita cooldown (`alert_cykl_s`, domyślnie 15 min)
+- Cooldown niezależny od globalnego — błąd czujnika i bateria nie blokują alertów temp
+- `/cichy_temp` wycisza alerty temp na 24h — błąd czujnika i bateria nadal aktywne
+- Konfigurowalny z dashboardu: 5/10/15/30/60 min
+
+**Heartbeat** (brak sygnału):
+- Zasilaczowe (typ=2): timeout = 3× `interwal_zasil_s`, minimum 5 min
+- Bateriowe (typ=1): timeout = 3× `interwal_s`, minimum 5 min
 
 **Tryb cichy** (cichy_od → cichy_do):
 - Alerty łagodne: blokowane
@@ -636,22 +641,20 @@ void wczytajPrefs() {
     prog_max = prefs.getFloat("prog_max", 8.0f);
     prog_min = prefs.getFloat("prog_min", 2.0f);
     interwal_s = prefs.getUInt("interwal_s", 1800);
-    cichy_od = prefs.getUChar("cichy_od", 23);
-    cichy_do = prefs.getUChar("cichy_do", 7);
-    
-    prefs.end();
+    cichy_od = prefs.getUChar("cichy_od", 0);
+    cichy_do = prefs.getUChar("cichy_do", 0);
+    alert_cykl_s = prefs.getUInt("alert_cykl", 900); // 15 min domyślnie
 }
 
 void zapiszPrefs() {
-    prefs.begin("mleko", false);  // read-write
-    
     prefs.putFloat("prog_max", prog_max);
     prefs.putFloat("prog_min", prog_min);
-    prefs.putUInt("interwal_s", interwal_s);
+    prefs.putFloat("prog_wzrost", prog_wzrost);
+    prefs.putUInt("interwal", interwal_s);
+    prefs.putUInt("interwal_zasil", interwal_zasil_s);
     prefs.putUChar("cichy_od", cichy_od);
     prefs.putUChar("cichy_do", cichy_do);
-    
-    prefs.end();
+    prefs.putUInt("alert_cykl", alert_cykl_s);
 }
 ```
 
@@ -756,10 +759,13 @@ Pobierz aktualną konfigurację.
 ```json
 {
   "prog_max": 8.0,
-  "prog_min": 2.0,
-  "interwal_s": 1800,
-  "cichy_od": 23,
-  "cichy_do": 7
+  "prog_min": -99.0,
+  "prog_wzrost": 2.0,
+  "interwal_min": 30,
+  "interwal_zasil_min": 5,
+  "alert_cykl_min": 15,
+  "cichy_od": 0,
+  "cichy_do": 0
 }
 ```
 
@@ -772,8 +778,9 @@ Zaktualizuj konfigurację.
 ```json
 {
   "prog_max": 8.5,
-  "prog_min": 1.5,
-  "interwal_s": 1800,
+  "prog_min": -99.0,
+  "interwal_zasil_min": 5,
+  "alert_cykl_min": 10,
   "cichy_od": 22,
   "cichy_do": 8
 }
@@ -999,6 +1006,20 @@ Ustaw tryb cichy (godziny 0–23).
 ✓ Tryb cichy: wyłączony (alerty zawsze)
 ```
 
+### Komenda: `/cichy_temp`
+
+Wycisz alerty temperaturowe (max/min) na 24h. Błąd czujnika i bateria nadal aktywne.
+
+```
+/cichy_temp
+🔕 Alerty temp wyciszone na 24h.
+  Błąd czujnika i bateria nadal aktywne.
+  Odwołaj: /cichy_temp off
+
+/cichy_temp off
+✅ Alerty temperaturowe wznowione.
+```
+
 ### Komenda: `/ustawienia`
 
 Pokaż aktualną konfigurację.
@@ -1034,10 +1055,12 @@ Dostępne komendy:
   /set_max <C>  — ustaw próg max
   /set_min <C>  — ustaw próg min
   /interwal <m> — zmień interwał (minuty)
-  /cichy <h> <h> — tryb cichy
-  /ustawienia   — pokaż config
-  /wifi-reset   — reset WiFi
-  /pomoc        — ta lista
+  /cichy <h> <h>  — tryb cichy (godziny)
+  /cichy_temp     — wycisz alerty temp na 24h
+  /cichy_temp off — wznów alerty temp
+  /ustawienia     — pokaż config
+  /wifi-reset     — reset WiFi
+  /pomoc          — ta lista
 ```
 
 ---
@@ -1585,8 +1608,10 @@ git reset --hard HEAD~1
 | Zmiana kanału WiFi | SOLVED | Channel hopping 1–13, 3 próby/kanał, hint RTC RAM |
 | OTA timeout LittleFS | SOLVED | Serwowanie z PSRAM (nie LittleFS) |
 | Telegram spam podczas channel-hopping | SOLVED v5.1 | Sonda wykrywana po temp=0+bat=0+blad=true |
-| Dashboard migotanie | SOLVED v5.1 | renderCzujniki() tylko gdy dane się zmienią |
-| ACK opóźniony przez Telegram HTTP | SOLVED v5.1 | ACK wysyłany z onDataRecv callback, nie loop() |
+| Dashboard migotanie | SOLVED v5.2 | renderCzujniki() tylko gdy dane się zmienią (satKey bez czasów) |
+| ACK opóźniony przez Telegram HTTP | SOLVED v5.2 | ACK wysyłany z onDataRecv callback, nie loop() |
+| Alert temp spam (co 5 min przez całą dobę) | SOLVED v5.3 | Per-satelita cooldown `alert_cykl_s` (domyślnie 15 min) |
+| Heartbeat fałszywy alarm (zasilaczowa) | SOLVED v5.3 | Timeout = 3× interwal_zasil_s (było hardcoded 5 min = interwał) |
 | mDNS na starym Androidzie | KNOWN | Fallback na IP w dashboardzie |
 
 ### TODO do następnych etapów

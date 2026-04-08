@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.2"
+#define FW_VERSION "5.3"
 
 // === WiFi ===
 
@@ -60,6 +60,8 @@ uint32_t interwal_s = 1800;       // sekundy — dla bateriowych (deep sleep)
 uint32_t interwal_zasil_s = 300;  // sekundy — dla zasilaczowych (always on)
 uint8_t cichy_od = 0;  // 0 = wyłączony
 uint8_t cichy_do = 0;
+uint32_t alert_cykl_s = 900;      // 15 min domyślnie — cykl powtarzania alertów temp
+unsigned long cichy_temp_do = 0;   // millis() do kiedy wyciszone alerty temp (0 = nie wyciszony)
 
 // === Struktury ESP-NOW ===
 
@@ -105,6 +107,8 @@ struct SatelitaInfo {
     bool ota_url_wyslany;  // true po wysłaniu URL w ACK — przy następnej wiad. czyścimy flagę
     char nazwa[32];         // nazwa nadana przez użytkownika, pusta = "Czujnik #N"
     bool tylko_monitoring;  // true = brak alertów Telegram, tylko podgląd
+    unsigned long ostatni_alert_temp_high; // millis() ostatniego alertu temp za wysoka
+    unsigned long ostatni_alert_temp_low;  // millis() ostatniego alertu temp za niska
     // Historia per satelita
     HistoriaWpis historia[MAX_HISTORIA_PER];
     int hist_idx;
@@ -478,34 +482,54 @@ bool czyTrybCichy() {
 void sprawdzAlerty(SatelitaInfo *s) {
     if (s->tylko_monitoring) return;
     if (s->ota_url_wyslany) return;
-    if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
+
+    // Sprawdź czy wyciszenie temp nie wygasło
+    bool cichy_temp_aktywny = false;
+    if (cichy_temp_do > 0) {
+        if (millis() > cichy_temp_do) {
+            cichy_temp_do = 0; // wygasł — reset
+        } else {
+            cichy_temp_aktywny = true;
+        }
+    }
 
     String prefix = "Czujnik #" + String(s->id) + ": ";
+
+    // === Alerty temperaturowe — własny per-satelita cooldown, niezależny od globalnego ===
+    if (!cichy_temp_aktywny && !s->pomiar.blad_czujnika) {
+        unsigned long cooldown = (unsigned long)alert_cykl_s * 1000UL;
+        if (s->pomiar.temperatura > prog_max) {
+            if (s->ostatni_alert_temp_high == 0 || millis() - s->ostatni_alert_temp_high >= cooldown) {
+                wyslijTelegram("🔴 <b>Smart Mleko</b>\n" + prefix + "Temperatura za wysoka: <b>"
+                    + String(s->pomiar.temperatura, 1) + "°C</b> (próg: " + String(prog_max, 1) + "°C)");
+                s->ostatni_alert_temp_high = millis();
+            }
+        }
+        if (prog_min > -50 && s->pomiar.temperatura < prog_min) {
+            if (s->ostatni_alert_temp_low == 0 || millis() - s->ostatni_alert_temp_low >= cooldown) {
+                wyslijTelegram("🔵 <b>Smart Mleko</b>\n" + prefix + "Temperatura za niska: <b>"
+                    + String(s->pomiar.temperatura, 1) + "°C</b> (próg: " + String(prog_min, 1) + "°C)");
+                s->ostatni_alert_temp_low = millis();
+            }
+        }
+    }
+
+    // === Pozostałe alerty — globalny cooldown 5 min ===
+    if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
+
     String msg = "";
     bool krytyczny = false;
 
     if (s->pomiar.blad_czujnika) {
         msg = "⚠️ <b>Smart Mleko</b>\n" + prefix + "Błąd czujnika temperatury!";
         krytyczny = true;
-    } else if (s->pomiar.temperatura > prog_max) {
-        msg = "🔴 <b>Smart Mleko</b>\n" + prefix + "Temperatura za wysoka: <b>";
-        msg += String(s->pomiar.temperatura, 1);
-        msg += "°C</b> (próg: " + String(prog_max, 1) + "°C)";
-        krytyczny = true;
-    } else if (prog_min > -50 && s->pomiar.temperatura < prog_min) {
-        msg = "🔵 <b>Smart Mleko</b>\n" + prefix + "Temperatura za niska: <b>";
-        msg += String(s->pomiar.temperatura, 1);
-        msg += "°C</b> (próg: " + String(prog_min, 1) + "°C)";
-        krytyczny = true;
     } else if (s->pomiar.bateria_procent <= 5 && s->typ == 1) {
-        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Bateria krytyczna: <b>";
-        msg += String(s->pomiar.bateria_procent);
-        msg += "%</b>";
+        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Bateria krytyczna: <b>"
+            + String(s->pomiar.bateria_procent) + "%</b>";
         krytyczny = true;
     } else if (s->pomiar.bateria_procent <= 15 && s->typ == 1) {
-        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Niski poziom baterii: <b>";
-        msg += String(s->pomiar.bateria_procent);
-        msg += "%</b>";
+        msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Niski poziom baterii: <b>"
+            + String(s->pomiar.bateria_procent) + "%</b>";
     } else if (!s->pomiar.blad_czujnika && prog_wzrost > 0 && s->hist_count >= 2) {
         int last_idx = (s->hist_idx - 1 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
         int prev_idx = (s->hist_idx - 2 + MAX_HISTORIA_PER) % MAX_HISTORIA_PER;
@@ -514,8 +538,8 @@ void sprawdzAlerty(SatelitaInfo *s) {
             if (dt > 0) {
                 float rate = (s->historia[last_idx].temperatura - s->historia[prev_idx].temperatura) / dt;
                 if (rate > prog_wzrost) {
-                    msg = "📈 <b>Smart Mleko</b>\n" + prefix + "Szybki wzrost temperatury: <b>+" + String(rate, 1) + "°C/h</b>";
-                    msg += "\n(próg: " + String(prog_wzrost, 1) + "°C/h)";
+                    msg = "📈 <b>Smart Mleko</b>\n" + prefix + "Szybki wzrost temperatury: <b>+"
+                        + String(rate, 1) + "°C/h</b>\n(próg: " + String(prog_wzrost, 1) + "°C/h)";
                 }
             }
         }
@@ -533,8 +557,8 @@ void sprawdzHeartbeat() {
         SatelitaInfo *s = &satelity[i];
         if (!s->aktywna) continue;
 
-        // Bateriowe: timeout = 3× interwał, zasilaczowe: 5 min
-        unsigned long timeout = (s->typ == 1) ? interwal_s * 3000UL : 300000UL;
+        // Bateriowe: timeout = 3× interwał, zasilaczowe: 3× interwał_zasil, minimum 5 min
+        unsigned long timeout = (s->typ == 1) ? interwal_s * 3000UL : interwal_zasil_s * 3000UL;
         if (timeout < 300000UL) timeout = 300000UL; // minimum 5 min
 
         if ((millis() - s->ostatni_czas) > timeout) {
@@ -558,8 +582,9 @@ void wczytajPreferences() {
     interwal_zasil_s = prefs.getUInt("interwal_zasil", 300);
     cichy_od = prefs.getUChar("cichy_od", 0);
     cichy_do = prefs.getUChar("cichy_do", 0);
-    Serial.printf("[Prefs] max=%.1f min=%.1f wzrost=%.1f interwal=%ds cichy=%d-%d\n",
-        prog_max, prog_min, prog_wzrost, interwal_s, cichy_od, cichy_do);
+    alert_cykl_s = prefs.getUInt("alert_cykl", 900);
+    Serial.printf("[Prefs] max=%.1f min=%.1f wzrost=%.1f interwal=%ds cichy=%d-%d alert_cykl=%ds\n",
+        prog_max, prog_min, prog_wzrost, interwal_s, cichy_od, cichy_do, alert_cykl_s);
 }
 
 void zapiszPreferences() {
@@ -570,6 +595,7 @@ void zapiszPreferences() {
     prefs.putUInt("interwal_zasil", interwal_zasil_s);
     prefs.putUChar("cichy_od", cichy_od);
     prefs.putUChar("cichy_do", cichy_do);
+    prefs.putUInt("alert_cykl", alert_cykl_s);
 }
 
 // === Komendy Telegram ===
@@ -688,6 +714,17 @@ void obsluzKomende(const String &tekst) {
             }
         } else {
             wyslijTelegram("❌ Podaj godziny, np. /cichy 23 7 (lub /cichy 0 0 żeby wyłączyć)");
+        }
+
+    } else if (cmd == "/cichy_temp" || cmd.startsWith("/cichy_temp ")) {
+        String arg = "";
+        if (cmd.length() > 12) { arg = cmd.substring(12); arg.trim(); }
+        if (arg == "off") {
+            cichy_temp_do = 0;
+            wyslijTelegram("✅ Alerty temperaturowe <b>wznowione</b>.");
+        } else {
+            cichy_temp_do = millis() + 86400000UL; // 24h
+            wyslijTelegram("🔕 Alerty temp wyciszone na <b>24h</b>.\nBłąd czujnika i bateria nadal aktywne.\nOdwołaj: /cichy_temp off");
         }
 
     } else if (cmd == "/ustawienia") {
@@ -857,7 +894,9 @@ void obsluzKomende(const String &tekst) {
         msg += "/interwal 30 — co ile minut mierzyć\n\n";
         msg += "<b>Powiadomienia:</b>\n";
         msg += "/cichy 23 7 — wycisz łagodne alerty\n";
-        msg += "/cichy 0 0 — wyłącz tryb cichy\n\n";
+        msg += "/cichy 0 0 — wyłącz tryb cichy\n";
+        msg += "/cichy_temp — wycisz alerty temp na 24h\n";
+        msg += "/cichy_temp off — wznów alerty temp\n\n";
         msg += "<b>WiFi:</b>\n";
         msg += "/wifi-reset — zmień sieć WiFi\n\n";
         msg += "/pomoc — ta lista";
@@ -1089,6 +1128,10 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;color:#1d
 <div class="cfg-row">
 <div><label>Interwal - zasilacz</label><div class="cfg-hint">Co ile minut czujnik sieciowy mierzy</div></div>
 <select id="cfgIntZ"><option value="1">1 min</option><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option></select>
+</div>
+<div class="cfg-row">
+<div><label>Cykl alertu temp</label><div class="cfg-hint">Co ile minut powtarzac alert gdy temp poza progiem</div></div>
+<select id="cfgAlertCykl"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 godz</option></select>
 </div>
 <div class="cfg-row">
 <div><label>Tryb cichy</label><div class="cfg-hint">Wycisz lagodne alerty w nocy</div></div>
@@ -1422,6 +1465,7 @@ document.getElementById('cfgWzrost').value=wzrostOn?d.prog_wzrost:2;
 document.getElementById('cfgWzrost').disabled=!wzrostOn;
 document.getElementById('cfgInt').value=d.interwal_min;
 document.getElementById('cfgIntZ').value=d.interwal_zasil_min;
+document.getElementById('cfgAlertCykl').value=d.alert_cykl_min;
 let cOn=d.cichy_od!==0||d.cichy_do!==0;
 document.getElementById('cichyOn').checked=cOn;
 document.getElementById('cfgCOd').value=d.cichy_od;
@@ -1440,6 +1484,7 @@ prog_min:document.getElementById('minOn').checked?parseFloat(document.getElement
 prog_wzrost:document.getElementById('wzrostOn').checked?parseFloat(document.getElementById('cfgWzrost').value):0,
 interwal_min:parseInt(document.getElementById('cfgInt').value),
 interwal_zasil_min:parseInt(document.getElementById('cfgIntZ').value),
+alert_cykl_min:parseInt(document.getElementById('cfgAlertCykl').value),
 cichy_od:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCOd').value):0,
 cichy_do:document.getElementById('cichyOn').checked?parseInt(document.getElementById('cfgCDo').value):0
 };
@@ -1642,6 +1687,7 @@ void setupServer() {
         doc["prog_wzrost"] = prog_wzrost;
         doc["interwal_min"] = interwal_s / 60;
         doc["interwal_zasil_min"] = interwal_zasil_s / 60;
+        doc["alert_cykl_min"] = alert_cykl_s / 60;
         doc["cichy_od"] = cichy_od;
         doc["cichy_do"] = cichy_do;
         String json;
@@ -1664,6 +1710,7 @@ void setupServer() {
             if (doc.containsKey("prog_wzrost")) prog_wzrost = doc["prog_wzrost"].as<float>();
             if (doc.containsKey("interwal_min")) interwal_s = doc["interwal_min"].as<int>() * 60;
             if (doc.containsKey("interwal_zasil_min")) interwal_zasil_s = doc["interwal_zasil_min"].as<int>() * 60;
+            if (doc.containsKey("alert_cykl_min")) alert_cykl_s = doc["alert_cykl_min"].as<int>() * 60;
             if (doc.containsKey("cichy_od")) cichy_od = doc["cichy_od"].as<int>();
             if (doc.containsKey("cichy_do")) cichy_do = doc["cichy_do"].as<int>();
             zapiszPreferences();
