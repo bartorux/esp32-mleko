@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.4"
+#define FW_VERSION "5.4.1"
 
 // === WiFi ===
 
@@ -1375,7 +1375,8 @@ if(newKey!==_lastSatKey){_lastSatKey=newKey;renderCzujniki(d.satelity);}
 if(_logOpen)odswiezLogi();
 }
 var _logOpen=false;
-document.getElementById('logDetails').addEventListener('toggle',function(){
+var _logEl=document.getElementById('logDetails');
+if(_logEl)_logEl.addEventListener('toggle',function(){
 _logOpen=this.open;if(_logOpen)odswiezLogi();
 });
 function odswiezLogi(){
