@@ -10,24 +10,14 @@
 
 // === Wersja ===
 
-#define SAT_FW_VERSION "2.8"
+#define SAT_FW_VERSION "3.0"
 
 // === Konfiguracja ===
 
-// Domyślne wartości — używane TYLKO przy pierwszym flashu USB.
-// Po pierwszym uruchomieniu zapisywane do Preferences (NVS).
-// OTA NIE nadpisuje Preferences — ID i TYP są bezpieczne.
-#define DEFAULT_ID          1     // zmień przed pierwszym flashem USB
-
-#ifdef PLATFORM_C3
-  #define DEFAULT_TYP       2     // zasilacz (C3 Super Mini)
-  #define PIN_DS18B20       4     // GPIO4 na C3 Super Mini
-#else
-  #define DEFAULT_TYP       1     // bateria (ESP32-S3 + 18650)
-  #define PIN_DS18B20       4     // GPIO4 na WEMOS D1
-  #define PIN_ADC_BATERIA   35    // GPIO35 — wbudowany dzielnik 100k/100k na Lolin D32
-  #define WSPOLCZYNNIK_ADC  2.0f
-#endif
+// ID zapisywane do Preferences (NVS) przy pierwszym flashu USB.
+// OTA NIE nadpisuje Preferences — ID jest bezpieczne.
+#define DEFAULT_ID      1     // zmień przed pierwszym flashem USB
+#define PIN_DS18B20     4     // GPIO4 na C3 Super Mini
 
 #define INTERWAL_DOMYSLNY_S 1800  // 30 minut
 #define TIMEOUT_ACK_MS      2000
@@ -39,12 +29,12 @@ uint8_t adresMatki[] = {0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8};
 
 typedef struct __attribute__((packed)) {
     uint8_t  id_czujnika;
-    uint8_t  typ_zasilania;   // 1 = bateria (deep sleep), 2 = zasilacz (always on)
+    uint8_t  typ_zasilania;   // zawsze 2 (zasilacz)
     float    temperatura;
-    uint8_t  bateria_procent;
+    uint8_t  bateria_procent; // zawsze 100
     uint32_t timestamp;
     bool     blad_czujnika;
-    char     fw_version[8];   // wersja firmware satelity
+    char     fw_version[8];
 } struct_message;
 
 typedef struct __attribute__((packed)) {
@@ -61,18 +51,17 @@ typedef struct __attribute__((packed)) {
 
 Preferences prefs;
 uint8_t id_czujnika;
-uint8_t typ_zasilania;
 
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature czujniki(&oneWire);
 
 volatile bool ack_otrzymany = false;
 struct_ack ostatni_ack;
-uint32_t interwal_s = INTERWAL_DOMYSLNY_S;
+uint32_t interwal_s = 60; // krótki start zanim Matka wyśle konfigurację
 
-// RTC RAM — przeżywa deep sleep, nie przeżywa power off
+// Przeżywa power-off (RTC RAM) — hint kanału i interwał
 RTC_DATA_ATTR uint8_t ostatni_kanal = 0;
-RTC_DATA_ATTR uint32_t rtc_interwal_s = INTERWAL_DOMYSLNY_S;
+RTC_DATA_ATTR uint32_t rtc_interwal_s = 60;
 
 // === Callback ACK ===
 
@@ -104,25 +93,12 @@ float odczytajTemperature(bool &blad) {
     return temp;
 }
 
-// === Odczyt baterii ===
-
-#ifndef PLATFORM_C3
-uint8_t odczytajBaterie() {
-    int raw = analogRead(PIN_ADC_BATERIA);
-    float napiecie = raw * (3.3f / 4095.0f) * WSPOLCZYNNIK_ADC;
-    int procent = constrain((int)((napiecie - 3.0f) / 1.2f * 100.0f), 0, 100);
-
-    Serial.printf("[BAT] RAW=%d, V=%.2f, %d%%\n", raw, napiecie, procent);
-    return (uint8_t)procent;
-}
-#endif
-
 // === Wysyłka pomiaru ===
 
 bool wyslijPomiar(float temp, bool blad, uint8_t bateria) {
     struct_message msg;
     msg.id_czujnika = id_czujnika;
-    msg.typ_zasilania = typ_zasilania;
+    msg.typ_zasilania = 2;
     msg.temperatura = temp;
     msg.bateria_procent = bateria;
     msg.timestamp = millis() / 1000;
@@ -135,7 +111,6 @@ bool wyslijPomiar(float temp, bool blad, uint8_t bateria) {
     } else {
         Serial.printf("  Temperatura:   %.2f C\n", temp);
     }
-    Serial.printf("  Bateria:       %d%%\n", bateria);
     Serial.println("========================================");
 
     esp_err_t wynik = esp_now_send(adresMatki, (uint8_t*)&msg, sizeof(msg));
@@ -161,10 +136,14 @@ bool znajdzKanal() {
         esp_wifi_set_channel(k, WIFI_SECOND_CHAN_NONE);
         Serial.printf("[CH] Kanal %d... ", k);
 
-        if (wyslijPomiar(0, true, 0) && czekajNaACK()) {
-            Serial.printf("ZNALEZIONO!\n");
-            ostatni_kanal = k;
-            return true;
+        // 3 proby na kanal — Matka moze byc chwilowo zajeta (Telegram, LittleFS)
+        for (int pr = 0; pr < 3; pr++) {
+            if (wyslijPomiar(0, true, 0) && czekajNaACK()) {
+                Serial.printf("ZNALEZIONO!\n");
+                ostatni_kanal = k;
+                return true;
+            }
+            if (pr < 2) delay(300);
         }
         Serial.printf("brak\n");
     }
@@ -177,7 +156,6 @@ bool znajdzKanal() {
 void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     Serial.printf("[OTA] Laczenie z WiFi: %s\n", ssid);
 
-    // Rozłącz ESP-NOW i połącz do WiFi
     esp_now_deinit();
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, pass);
@@ -192,13 +170,12 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\n[OTA] WiFi nie polaczone — rezygnuje");
         WiFi.disconnect();
-        ESP.restart(); // restart żeby wrócić do ESP-NOW
+        ESP.restart();
         return;
     }
     Serial.printf("\n[OTA] WiFi OK! IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("[OTA] Pobieram: %s\n", url);
 
-    // Pobierz rozmiar pliku
     HTTPClient http;
     http.begin(url);
     http.setTimeout(60000);
@@ -212,7 +189,6 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
     }
 
     int totalSize = http.getSize();
-    // NIE zamykamy http — potrzebujemy strumienia do streamingu
 
     if (totalSize <= 0) {
         Serial.println("[OTA] Pusty plik — restart");
@@ -232,7 +208,6 @@ void wykonajOTA(const char *url, const char *ssid, const char *pass) {
         ESP.restart();
     }
 
-    // Stream całego pliku bez Range requests (ESPAsyncWebServer nie obsługuje Range)
     WiFiClient *stream = http.getStreamPtr();
     if (!stream) {
         Serial.println("[OTA] Brak strumienia — restart");
@@ -290,39 +265,30 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Preferences — ID i TYP przeżywają OTA
+    // Preferences — ID przeżywa OTA
     prefs.begin("satelita", false);
     if (!prefs.isKey("id")) {
-        // Pierwszy flash — zapisz domyślne wartości
         prefs.putUChar("id", DEFAULT_ID);
-        prefs.putUChar("typ", DEFAULT_TYP);
-        Serial.println("[Prefs] Pierwszy flash — zapisano ID i TYP");
+        Serial.println("[Prefs] Pierwszy flash — zapisano ID");
     }
     id_czujnika = prefs.getUChar("id", DEFAULT_ID);
-    typ_zasilania = prefs.getUChar("typ", DEFAULT_TYP);
-    // Zasilaczowa: startuje z krótkim interwałem zanim Matka wyśle konfigurację
-    if (typ_zasilania == 2 && rtc_interwal_s == INTERWAL_DOMYSLNY_S) {
-        rtc_interwal_s = 60;
-    }
-    interwal_s = rtc_interwal_s; // przywróć interwał z poprzedniego cyklu
+    prefs.end();
+
+    interwal_s = rtc_interwal_s;
 
     Serial.println();
     Serial.println("================================");
     Serial.printf("  SATELITA — Smart Mleko v%s\n", SAT_FW_VERSION);
-    Serial.printf("  ID: %d  TYP: %s\n", id_czujnika, typ_zasilania == 1 ? "bateria" : "zasilacz");
+    Serial.printf("  ID: %d  TYP: zasilacz\n", id_czujnika);
     Serial.println("================================");
 
-    // DS18B20
     czujniki.begin();
-    int ilosc = czujniki.getDeviceCount();
-    Serial.printf("[DS18B20] Znaleziono czujnikow: %d\n", ilosc);
+    Serial.printf("[DS18B20] Znaleziono czujnikow: %d\n", czujniki.getDeviceCount());
 
-    // WiFi w trybie STA (wymagane dla ESP-NOW)
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     Serial.printf("MAC Satelity: %s\n", WiFi.macAddress().c_str());
 
-    // ESP-NOW
     if (esp_now_init() != ESP_OK) {
         Serial.println("[BLAD] ESP-NOW init!");
         return;
@@ -331,7 +297,6 @@ void setup() {
     esp_now_register_recv_cb(onDataRecv);
     esp_now_register_send_cb(onDataSent);
 
-    // Dodaj Matkę jako peer
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, adresMatki, 6);
     peer.channel = 0;
@@ -353,18 +318,9 @@ void loop() {
     odczytajTemperature(dummy_blad);
     delay(100);
 
-    // Właściwy pomiar
     bool blad;
     float temp = odczytajTemperature(blad);
 
-    // Bateria
-    #ifdef PLATFORM_C3
-    uint8_t bateria = 100; // zasilacz — zawsze 100%
-    #else
-    uint8_t bateria = odczytajBaterie();
-    #endif
-
-    // Ustaw ostatnio znany kanał (hint z RTC RAM)
     bool polaczono = false;
     if (ostatni_kanal > 0) {
         esp_wifi_set_channel(ostatni_kanal, WIFI_SECOND_CHAN_NONE);
@@ -374,15 +330,14 @@ void loop() {
                 Serial.printf("[CH] Hint retry %d...\n", retry);
                 delay(500);
             }
-            if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
+            if (wyslijPomiar(temp, blad, 100) && czekajNaACK()) {
                 polaczono = true;
             }
         }
     }
 
-    // Fallback — channel hopping jeśli hint nie zadziałał
     if (!polaczono) {
-        if (wyslijPomiar(temp, blad, bateria) && czekajNaACK()) {
+        if (wyslijPomiar(temp, blad, 100) && czekajNaACK()) {
             polaczono = true;
         } else {
             Serial.println("[WARN] Brak ACK — proba channel hopping...");
@@ -392,9 +347,7 @@ void loop() {
         }
     }
 
-    // Obsługa ACK — interwał, OTA
     if (polaczono) {
-        // Zapisz kanał na przyszłość
         uint8_t kanal;
         wifi_second_chan_t second;
         esp_wifi_get_channel(&kanal, &second);
@@ -402,7 +355,7 @@ void loop() {
 
         if (ostatni_ack.nowy_interwal_s > 0) {
             interwal_s = ostatni_ack.nowy_interwal_s;
-            rtc_interwal_s = interwal_s; // zapisz w RTC RAM — przeżyje deep sleep
+            rtc_interwal_s = interwal_s;
             Serial.printf("[ACK] Nowy interwal: %d s\n", interwal_s);
         }
         if (ostatni_ack.ota_pending && strlen(ostatni_ack.ota_url) > 0 && strlen(ostatni_ack.wifi_ssid) > 0) {
@@ -411,17 +364,7 @@ void loop() {
         }
     }
 
-    if (typ_zasilania == 1) {
-        // Bateria — Deep Sleep
-        uint32_t sleep_s = polaczono ? interwal_s : 60; // brak Matki → krótki retry
-        Serial.printf("[SLEEP] Deep sleep %lu s...\n\n", sleep_s);
-        Serial.flush();
-        prefs.end();
-        esp_deep_sleep(sleep_s * 1000000ULL);
-    } else {
-        // Zasilacz — delay w pętli (always on)
-        uint32_t czekaj_s = polaczono ? interwal_s : 60; // brak Matki → krótki retry
-        Serial.printf("[SLEEP] Czekam %lu s...\n\n", (unsigned long)czekaj_s);
-        delay(czekaj_s * 1000);
-    }
+    uint32_t czekaj_s = polaczono ? interwal_s : 60;
+    Serial.printf("[SLEEP] Czekam %lu s...\n\n", (unsigned long)czekaj_s);
+    delay(czekaj_s * 1000);
 }

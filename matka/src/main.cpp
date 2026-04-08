@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.0"
+#define FW_VERSION "5.2"
 
 // === WiFi ===
 
@@ -343,6 +343,8 @@ void usunWiFiCreds() {
 
 // === Callback ESP-NOW ===
 
+void wyslijACK(SatelitaInfo *s);  // forward declaration
+
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     if (len != sizeof(struct_message)) return;
 
@@ -355,21 +357,25 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         return;
     }
 
-    memcpy(&s->pomiar, &msg, sizeof(struct_message));
-    s->ostatni_czas = millis();
-    s->aktywna = true;
-
-    Serial.printf("[ESP-NOW] Satelita #%d od %s: %.1f°C bat=%d%%\n",
-        msg.id_czujnika, macToString(mac).c_str(),
-        msg.temperatura, msg.bateria_procent);
-
-    // Reset OTA — gdy satelita wróciła po restarcie (URL już był wysłany)
-    // NIE kasujemy .bin — jest nadpisywany przy kolejnym uploadzie z dashboardu
-    if (s->ota_pending && s->ota_url_wyslany) {
-        s->ota_pending = false;
-        s->ota_url_wyslany = false;
-        Serial.printf("[OTA] Satelita #%d — flaga wyczyszczona\n", s->id);
+    // Filtruj sondy channel-hopping (temp=0, bat=0, blad=true) — nie nadpisuj danych czujnika
+    bool is_probe = (msg.blad_czujnika && msg.temperatura == 0.0f && msg.bateria_procent == 0);
+    if (!is_probe) {
+        memcpy(&s->pomiar, &msg, sizeof(struct_message));
+        s->ostatni_czas = millis();
+        s->aktywna = true;
+        Serial.printf("[ESP-NOW] Satelita #%d od %s: %.1f°C bat=%d%%\n",
+            msg.id_czujnika, macToString(mac).c_str(),
+            msg.temperatura, msg.bateria_procent);
+        // Reset OTA — gdy satelita wróciła po restarcie (URL już był wysłany)
+        if (s->ota_pending && s->ota_url_wyslany) {
+            s->ota_pending = false;
+            s->ota_url_wyslany = false;
+            Serial.printf("[OTA] Satelita #%d — flaga wyczyszczona\n", s->id);
+        }
     }
+
+    // ACK zawsze — sonda też potrzebuje odpowiedzi żeby znaleźć kanał
+    wyslijACK(s);
 }
 
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
@@ -471,6 +477,7 @@ bool czyTrybCichy() {
 
 void sprawdzAlerty(SatelitaInfo *s) {
     if (s->tylko_monitoring) return;
+    if (s->ota_url_wyslany) return;
     if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
 
     String prefix = "Czujnik #" + String(s->id) + ": ";
@@ -1075,7 +1082,7 @@ body{font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;color:#1d
 <div><label>Alert wzrostu</label><div class="cfg-hint">Alarm gdy temp rosnie zbyt szybko (C/h)</div></div>
 <div class="cfg-check"><input type="checkbox" id="wzrostOn" onchange="toggleWzrost()"><input type="number" id="cfgWzrost" step="0.5" min="0.1" max="20" style="width:75px"></div>
 </div>
-<div class="cfg-row">
+<div class="cfg-row" style="display:none">
 <div><label>Interwal - bateria</label><div class="cfg-hint">Co ile minut czujnik bateryjny mierzy</div></div>
 <select id="cfgInt"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 godz</option><option value="120">2 godz</option></select>
 </div>
@@ -1160,7 +1167,7 @@ html+='<div class="temp-display"><span class="'+tempClass+'" style="color:'+kolo
 html+='<div class="info-grid">';
 if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';}
 else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#34c759">Sieciowe</div></div>';}
-html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value">'+s.ostatni+'</div></div>';
+html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value" id="ago_'+s.id+'">'+s.ostatni+'</div></div>';
 html+='</div>';
 let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty aktywne';
 let monStyle=s.tylko_monitoring?'background:#f5f5f7;color:#6e6e73;border:1px solid #d2d2d7':'background:#e8f9ef;color:#1a7f3c;border:1px solid #b7f0cd';
@@ -1222,18 +1229,60 @@ let y=h-15-((p.v-vmin)/(vmax-vmin))*(h-30);
 if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
 });
 ctx.stroke();
-ctx.fillStyle='#aeaeb2';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='center';
+// Kropki na każdej próbce
+ctx.lineWidth=1.5;
+d.forEach(function(p){
+let x=40+((p.t-tmin)/(tmax-tmin))*(w-50);
+let y=h-15-((p.v-vmin)/(vmax-vmin))*(h-30);
+ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);
+ctx.fillStyle=kolorSat(sat.id);ctx.fill();
+ctx.strokeStyle='#fff';ctx.stroke();
+});
+// Tooltip hover
+cv._cd={d:d,tmin:tmin,tmax:tmax,vmin:vmin,vmax:vmax,sid:sat.id};
+if(!cv._hl){cv._hl=true;
+cv.addEventListener('mousemove',function(e){
+var cd=cv._cd;if(!cd||!cd.d.length)return;
+var r=cv.getBoundingClientRect();
+var mx=(e.clientX-r.left)*(cv.width/r.width);
+var best=null,bd=9999;
+cd.d.forEach(function(p){
+var x=40+((p.t-cd.tmin)/(cd.tmax-cd.tmin))*(cv.width-50);
+var dx=Math.abs(mx-x);if(dx<bd){bd=dx;best=p;}
+});
+var tip=document.getElementById('chart-tip');
+if(!tip){tip=document.createElement('div');tip.id='chart-tip';tip.style.cssText='position:fixed;background:rgba(30,30,30,0.85);color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;pointer-events:none;white-space:nowrap;z-index:999';document.body.appendChild(tip);}
+if(!best||bd>30){tip.style.display='none';return;}
+var date=new Date(best.t*1000);
+var ts=('0'+date.getHours()).slice(-2)+':'+('0'+date.getMinutes()).slice(-2);
+tip.textContent=best.v.toFixed(1)+'\u00b0C \u2014 '+ts;
+tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-32)+'px';
+});
+cv.addEventListener('mouseleave',function(){
+var tip=document.getElementById('chart-tip');if(tip)tip.style.display='none';
+});}
+ctx.fillStyle='#aeaeb2';ctx.font='10px -apple-system,sans-serif';
 [0,0.25,0.5,0.75,1].forEach(function(f){
 let t=tmin+f*(tmax-tmin);
 let date=new Date(t*1000);
 let lbl=('0'+date.getHours()).slice(-2)+':'+('0'+date.getMinutes()).slice(-2);
 let x=40+f*(w-50);
+ctx.textAlign=f===1?'right':(f===0?'left':'center');
 ctx.fillText(lbl,x,h-2);
 });
 });
 }).catch(()=>{});
 }
 
+var _lastSatKey='';
+function satKey(sats){
+if(!sats)return'';
+return JSON.stringify(sats.map(function(s){
+return{id:s.id,t:s.temperatura,b:s.bateria,e:s.blad_czujnika,
+a:s.aktywna,fw:s.fw,n:s.nazwa,tm:s.tylko_monitoring,
+tr:s.trend!==undefined&&s.trend!==null?s.trend.toFixed(1):null};
+}));
+}
 function update(){
 fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('czas').textContent=d.czas_ntp;
@@ -1243,7 +1292,13 @@ document.getElementById('ip').textContent=d.ip;
 document.getElementById('uptime').textContent=d.uptime;
 document.getElementById('ntp').textContent=d.czas_ntp;
 document.getElementById('satCount').textContent=d.satelity?d.satelity.length:'0';
-renderCzujniki(d.satelity);
+// Aktualizuj "ostatni pomiar" bez przebudowy DOM
+if(d.satelity)d.satelity.forEach(function(s){
+var el=document.getElementById('ago_'+s.id);if(el)el.textContent=s.ostatni;
+});
+// Pełna przebudowa tylko gdy dane pomiarowe się zmieniły
+var newKey=satKey(d.satelity);
+if(newKey!==_lastSatKey){_lastSatKey=newKey;renderCzujniki(d.satelity);}
 }).catch(e=>console.log(e));
 }
 update();
@@ -1996,13 +2051,12 @@ void loop() {
         for (int i = 0; i < ile_satelit; i++) {
             SatelitaInfo *s = &satelity[i];
             // Jeśli pomiar jest świeży (< 2s temu) i jeszcze nie przetworzony
-            if (s->ostatni_czas > 0 && (millis() - s->ostatni_czas) < 2000) {
+            if (s->ostatni_czas > 0 && (millis() - s->ostatni_czas) < 10000) {
                 // Sprawdź czy ten pomiar był już przetworzony
                 static unsigned long przetworzone[MAX_SATELITY] = {0};
                 if (przetworzone[i] != s->ostatni_czas) {
                     przetworzone[i] = s->ostatni_czas;
                     wyswietlPomiar(s);
-                    wyslijACK(s);
                     sprawdzAlerty(s);
                     if (!s->pomiar.blad_czujnika) {
                         dodajDoHistorii(s, s->pomiar.temperatura);

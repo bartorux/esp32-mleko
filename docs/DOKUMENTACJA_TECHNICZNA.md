@@ -1,9 +1,9 @@
 # DOKUMENTACJA TECHNICZNA: Smart Mleko ESP-NOW
 
 **Projekt:** Smart Mleko — System monitorowania temperatury mleka oparte o ESP-NOW  
-**Wersja dokumentacji:** 1.0  
-**Data:** 2026-04-02  
-**Status:** Produkcyjny (Matka v4.1, Satelita v2.6)  
+**Wersja dokumentacji:** 2.0  
+**Data:** 2026-04-08  
+**Status:** Produkcyjny (Matka v5.1, Satelita v3.0)  
 **Typ:** Dokumentacja techniczna dla developerów
 
 ---
@@ -39,10 +39,9 @@ System monitorowania temperatury mleka w schładzalniku dla teścia. Topologia g
 - **Komunikacja**: ESP-NOW (2.4 GHz, bez WiFi, zasięg ~100 m)
 - **Czujnik**: DS18B20 One-Wire (dokładność ±0.5°C)
 - **Zasilanie Matki**: 5V/1A z USB-C (24/7)
-- **Zasilanie Satelity**: 18650 Li-Ion 2500 mAh (bateria) lub USB-C (zasilacz)
+- **Zasilanie Satelity**: USB-C 5V (always-on, bez baterii)
 - **Interface**: Dashboard web (mleko.local), Telegram bot
-- **Interwał pomiaru**: 30 minut (domyślnie)
-- **Czasu pracy baterii**: ~150 dni (2500 mAh, 30 min interwał, 20°C)
+- **Interwał pomiaru**: 5 minut (domyślnie, konfigurowalny)
 
 ### Kluczowe ustalenia
 
@@ -51,7 +50,7 @@ System monitorowania temperatury mleka w schładzalniku dla teścia. Topologia g
 - Tryb cichy: alerty łagodne blokowane, krytyczne zawsze przechodzą
 - Czas synchronizowany z NTP (Europe/Warsaw)
 - OTA dla obu urządzeń
-- Deep Sleep tylko na Satelicie (bateria)
+- Satelita always-on (zasilacz), brak Deep Sleep
 
 ---
 
@@ -79,10 +78,10 @@ System monitorowania temperatury mleka w schładzalniku dla teścia. Topologia g
      │
  ┌───┴────────┬───────────────┬──────────┬──────────┐
  │            │               │          │          │
-SAT#1 (Bateria) SAT#2 (Bateria) SAT#3 (Zasilacz) ... SAT#8
+SAT#1 (Zasil) SAT#2 (Zasil)  SAT#3 (Zasil)  ... SAT#8
  │            │               │          │          │
  DS18B20    DS18B20         DS18B20    DS18B20     ...
- 18650      18650           USB-C      USB-C
+ USB-C      USB-C           USB-C      USB-C
 
 Legenda:
   SAT  = Satelita (sensor + mikrokontroler)
@@ -122,31 +121,19 @@ Jeśli Satelita nie otrzyma ACK (brak Matki w zasiegu):
 
 **Ładowarka**: Samsung, Xiaomi, Anker lub markowa. Tanie klony bez certyfikatów mogą powodować losowe resety przez niestabilne napięcie.
 
-### Satelita — wariant bateria (esp32_bat)
-
-| Parametr | Wartość |
-|----------|---------|
-| Mikrokontroler | WEMOS D1 ESP32 (board: lolin_d32) |
-| Czujnik | DS18B20 waterproof (GPIO4) |
-| Bateria | 18650 Li-Ion 2500 mAh |
-| Ładowarka PCB | wbudowana w koszyku WEMOS |
-| ADC baterii | GPIO34 (współczynnik: 2.0) |
-| Zasilanie | DC z 18650 ~ 3.7V (zasilacz na PCB) |
-| Łączność | ESP-NOW |
-| Konsumpcja | ~45 mA w pracy, µA w Deep Sleep |
-| Interwał | 30 min (domyślnie) |
-
-### Satelita — wariant zasilacz (esp32c3_zas)
+### Satelita (esp32c3_zas)
 
 | Parametr | Wartość |
 |----------|---------|
 | Mikrokontroler | ESP32-C3 Super Mini |
-| Czujnik | DS18B20 waterproof (GPIO2) |
+| Czujnik | DS18B20 waterproof (GPIO4) |
 | Zasilanie | USB-C 5V/1A |
 | Łączność | ESP-NOW |
 | Tryb pracy | Pętla nieskończona (no Deep Sleep) |
-| Interwał | 30 min (konfigurowalny) |
-| Rezystor pull-up | 4.7 kΩ |
+| Interwał | 5 min domyślnie (konfigurowalny z dashboardu) |
+| Rezystor pull-up | 4.7 kΩ (DATA–3.3V) |
+
+> **Uwaga:** Wariant bateryjny (WEMOS D1 lolin_d32) został usunięty z projektu. Jeśli w przyszłości dodany zostanie chip H2 lub inna platforma, tworzyć nowy env w platformio.ini.
 
 ### Schemat podłączenia DS18B20
 
@@ -167,14 +154,9 @@ Bez rezystora pull-up zwraca -127°C.
 ### Stałe hardware'owe (GPIO, ADC)
 
 ```cpp
-// Satelita bateriowa (WEMOS D1 ESP32 / lolin_d32)
-#define PIN_DS18B20           4      // GPIO4
-#define PIN_ADC_BATERIA       34     // GPIO34
-#define WSPOLCZYNNIK_ADC      2.0f   // zmierz multimetrem!
-
-// Satelita zasilaczowa (ESP32-C3 Super Mini)
-#define PIN_DS18B20           2      // GPIO2 na C3
-// Brak ADC — typ=2 (zasilacz)
+// Satelita (ESP32-C3 Super Mini)
+#define PIN_DS18B20   4   // GPIO4
+// Brak ADC — typ=2 (zasilacz), bateria_procent zawsze 100
 ```
 
 ---
@@ -231,75 +213,58 @@ typedef struct __attribute__((packed)) {
 
 ## 5. Oprogramowanie Satelity
 
-### Wersja: 2.6
+### Wersja: 3.0
 
-**Plik**: `satelita/src/main.cpp`
+**Plik**: `satelita/src/main.cpp`  
+**Platforma**: ESP32-C3 Super Mini (mains-only, always-on)
 
 ### Schemat logiczny
 
 ```
 ┌──────────────────────────────────────┐
 │         Boot Satelity                │
-│   Wczytaj ID, TYP z Preferences      │
+│   Wczytaj ID z Preferences (NVS)     │
 │   Wczytaj ostatni_kanal z RTC RAM    │
+│   Wczytaj rtc_interwal_s z RTC RAM   │
 └──────────────────────────────────────┘
                  ↓
 ┌──────────────────────────────────────┐
 │   Inicjalizacja ESP-NOW              │
-│   Ustawienie kanału (tip z RTC RAM)  │
+│   Ustawienie kanału (hint z RTC RAM) │
 │   Dodanie Matki jako peer            │
 └──────────────────────────────────────┘
                  ↓
         ╔════════════════════╗
         ║  GŁÓWNA PĘTLA      ║
-        ║  delay(INTERWAL)   ║
+        ║  delay(interwal_s) ║
         ╚════════════════════╝
-                 ↓
-   ┌─────────────────────────────────┐
-   │  Sprawdź okno godzinowe (RTC)   │
-   │  Czy poza oknem? → wrócić do    │
-   │  delay(), skip pomiaru          │
-   └─────────────────────────────────┘
                  ↓
    ┌─────────────────────────────────┐
    │  Pomiar DS18B20                 │
    │  (1) warmup — odrzuć            │
    │  (2) właściwy — użyj            │
-   │  Odczyt ADC baterii (jeśli typ=1)
    └─────────────────────────────────┘
                  ↓
    ┌─────────────────────────────────┐
    │  Wyślij struct_message ESP-NOW  │
-   │  do Matki (MAC hardcoded)       │
+   │  Hint: spróbuj ostatni_kanal    │
+   │  Fallback: channel hopping 1–13 │
+   │  3 próby na kanał, 300ms przerwa│
    └─────────────────────────────────┘
                  ↓
    ┌─────────────────────────────────┐
    │  Czekaj ACK (timeout 2000 ms)   │
    └─────────────────────────────────┘
          │              │
-      ACK OK        TIMEOUT
-         │              │
-         ↓              ↓
-   ┌──────────────┐  ┌──────────────────┐
-   │ Odbierz ACK: │  │ Channel Hopping  │
-   │ • interwał   │  │ Kanały 1–13      │
-   │ • okno godz. │  │ Retransmit       │
-   │ • OTA flag   │  │ Max 500ms na ch  │
-   └──────────────┘  │ Zapisz kanał     │
-         │           │ w RTC RAM        │
-         ↓           └──────────────────┘
-   ┌──────────────────────────────┐
-   │ Aktualizuj RTC RAM:          │
-   │ • interwal_s                 │
-   │ • godzina_start/stop         │
-   │ Zapisz ostatni_kanal (hint)  │
-   └──────────────────────────────┘
+      ACK OK        TIMEOUT (60s retry)
          │
          ↓
    ┌──────────────────────────────┐
-   │ Czy ota_pending? (ACK)       │
-   │ TAK:  OTA Download           │
-   │ NIE:  Deep Sleep / delay()   │
+   │ Z ACK: zaktualizuj           │
+   │ • interwal_s → rtc_interwal_s│
+   │ • ostatni_kanal (RTC RAM)    │
+   │ Czy ota_pending?             │
+   │   TAK → wykonajOTA()         │
    └──────────────────────────────┘
 ```
 
@@ -309,12 +274,12 @@ typedef struct __attribute__((packed)) {
 
 ```cpp
 float odczytajTemperature(bool &blad) {
-    // PRIMEIRO: warmup (odrzuć)
+    // Warmup — odrzuć stary wynik z bufora DS18B20
     czujniki.requestTemperatures();
     czujniki.getTempCByIndex(0);  // odrzuć
     delay(100);
 
-    // DRUGI: właściwy
+    // Właściwy pomiar
     czujniki.requestTemperatures();
     float temp = czujniki.getTempCByIndex(0);
 
@@ -332,79 +297,48 @@ float odczytajTemperature(bool &blad) {
 
 **Dlaczego warmup?** DS18B20 po budzeniu może zwrócić stary wynik z bufora. Zawsze 2 czytania.
 
-#### Odczyt baterii (typ=1 tylko)
-
-```cpp
-uint8_t odczytajBaterie() {
-    int raw = analogRead(PIN_ADC_BATERIA);
-    // raw: 0–4095 (całe napięcie 3.3V)
-    // Dzielnik na płytce WEMOS mapuje: 0–4095 → 0–6.6V
-    float napiecie = raw * (3.3f / 4095.0f) * WSPOLCZYNNIK_ADC;
-    
-    // Liniowa interpolacja 3.0V (0%) do 4.2V (100%)
-    int procent = constrain(
-        (int)((napiecie - 3.0f) / 1.2f * 100.0f),
-        0, 100
-    );
-    
-    Serial.printf("[BAT] raw=%d V=%.2f %d%%\n", 
-                  raw, napiecie, procent);
-    return (uint8_t)procent;
-}
-```
-
-**Uwagi**:
-- `WSPOLCZYNNIK_ADC = 2.0f` zmierzyć multimetrem!
-- Nieliniowość ±5% — wystarczająca do alertów
-- Typ=2 (zasilacz) -> zawsze 100%
-
-#### Channel Hopping
+#### Channel Hopping (z retry na kanał)
 
 ```cpp
 bool znajdzKanal() {
-    // Hint: ostatni kanał z RTC RAM
-    if (ostatni_kanal > 0 && ostatni_kanal <= 13) {
-        Serial.printf("[CH] Hint: kanał %d\n", ostatni_kanal);
-        esp_wifi_set_channel(ostatni_kanal, WIFI_SECOND_CHAN_NONE);
-        if (wyslijPomiar(...) && czekajNaACK()) {
-            return true;  // znaleziono!
-        }
-    }
-
-    // Fallback: skanuj 1–13
     for (int k = 1; k <= 13; k++) {
         esp_wifi_set_channel(k, WIFI_SECOND_CHAN_NONE);
-        if (wyslijPomiar(...) && czekajNaACK()) {
-            ostatni_kanal = k;  // zapisz do RTC RAM
-            return true;
+        // 3 próby na kanał — Matka może być chwilowo zajęta (Telegram)
+        for (int pr = 0; pr < 3; pr++) {
+            if (wyslijPomiar(0, true, 0) && czekajNaACK()) {
+                ostatni_kanal = k;  // zapisz do RTC RAM
+                return true;
+            }
+            if (pr < 2) delay(300);
         }
     }
-    
-    return false;  // Nie znaleziono
+    return false;
 }
 ```
 
-**RTC RAM przeżywa Deep Sleep ale nie power off.**
+**Ważne:** Sonda channel-hopping ma `temperatura=0, bateria=0, blad=true`. Matka rozpoznaje ten wzorzec i **nie aktualizuje danych czujnika** ani nie wysyła alertu Telegram — tylko odpowiada ACK.
 
-#### Okno godzinowe
+#### Konfiguracja Preferences (NVS)
 
 ```cpp
-bool czyWOknie() {
-    if (g_start == 0 && g_stop == 0) return true;  // 24h
-    
-    uint8_t h = rtc_godzina();  // 0–23, z RTC
-    
-    if (g_start < g_stop) {
-        // Normalne: 6–22
-        return h >= g_start && h < g_stop;
-    }
-    
-    // Przez północ: 22–6
-    return h >= g_start || h < g_stop;
+prefs.begin("satelita", false);
+if (!prefs.isKey("id")) {
+    prefs.putUChar("id", DEFAULT_ID);  // tylko przy pierwszym flashu USB
 }
+id_czujnika = prefs.getUChar("id", DEFAULT_ID);
+prefs.end();
 ```
 
-Zmiana interwału lub okna wchodzi w życie po max jednym starym interwale.
+**Preferences przeżywają OTA** — ID jest bezpieczne. `typ_zasilania` usunięty z NVS (zawsze 2).
+
+#### RTC RAM — przeżywa power-off
+
+```cpp
+RTC_DATA_ATTR uint8_t ostatni_kanal = 0;      // hint kanału na start
+RTC_DATA_ATTR uint32_t rtc_interwal_s = 60;   // interwał z poprzedniego cyklu
+```
+
+`rtc_interwal_s` startuje od 60s (szybki pierwszy pomiar zanim Matka wyśle konfigurację).
 
 #### OTA Download
 
@@ -488,7 +422,7 @@ void setup() {
 
 ## 6. Oprogramowanie Matki
 
-### Wersja: 4.1
+### Wersja: 5.1
 
 **Plik**: `matka/src/main.cpp` (single-file firmware, ~2000 linii)
 
@@ -596,6 +530,8 @@ struct SatelitaInfo {
 
 ### Callback ESP-NOW (onDataRecv)
 
+ACK jest wysyłany **natychmiast z callbacku**, nie z `loop()`. Eliminuje opóźnienie spowodowane przez `sprawdzTelegram()` (blokujące HTTP, do kilku sekund).
+
 ```cpp
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     if (len != sizeof(struct_message)) return;
@@ -603,36 +539,32 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     struct_message msg;
     memcpy(&msg, data, sizeof(struct_message));
 
-    // Auto-discovery: dodaj satelitę jeśli nowa
     SatelitaInfo *s = znajdzLubDodajSatelite(
-        msg.id_czujnika, 
-        msg.typ_zasilania, 
-        mac
+        msg.id_czujnika, msg.typ_zasilania, mac
     );
     if (!s) return;
 
-    // Zaktualizuj ostatni pomiar
-    memcpy(&s->pomiar, &msg, sizeof(struct_message));
-    s->ostatni_czas = millis();
-    s->aktywna = true;
-
-    // Dodaj do ring buffora
-    dodajDoHistorii(s, msg.temperatura);
-
-    // Reset OTA: gdy satelita wróciła po restarcie
-    if (s->ota_pending && s->ota_url_wyslany) {
-        s->ota_pending = false;
-        s->ota_url_wyslany = false;
-        Serial.printf("[OTA] Satelita #%d — OTA complete\n", s->id);
+    // Filtruj sondy channel-hopping (temp=0, bat=0, blad=true)
+    // Sonda NIE aktualizuje danych, NIE triggeruje alertów Telegram
+    bool is_probe = (msg.blad_czujnika && msg.temperatura == 0.0f 
+                     && msg.bateria_procent == 0);
+    if (!is_probe) {
+        memcpy(&s->pomiar, &msg, sizeof(struct_message));
+        s->ostatni_czas = millis();
+        s->aktywna = true;
+        // Reset OTA: gdy satelita wróciła po restarcie
+        if (s->ota_pending && s->ota_url_wyslany) {
+            s->ota_pending = false;
+            s->ota_url_wyslany = false;
+        }
     }
 
-    // Wyślij ACK z aktualną konfiguracją
+    // ACK zawsze — sonda też potrzebuje odpowiedzi
     wyslijACK(s);
-
-    // Sprawdzaj alerty
-    sprawdzAlerty(s);
 }
 ```
+
+**Uwaga:** `sprawdzAlerty()` i `dodajDoHistorii()` wywoływane są w `loop()` na podstawie `s->ostatni_czas`. Sondy channel-hopping nie aktualizują `ostatni_czas` → nie trafiają do historii ani alertów.
 
 ### Wysłanie ACK
 
@@ -1336,10 +1268,10 @@ esp32-mleko/
 │   └── data/                  ← LittleFS (jeśli potrzebny)
 │
 └── satelita/
-    ├── platformio.ini         ← 2 environments: esp32_bat, esp32c3_zas
+    ├── platformio.ini         ← 1 environment: esp32c3_zas
     ├── src/
-    │   └── main.cpp           ← firmware satelity
-    ├── firmware.bin           ← output dla OTA
+    │   └── main.cpp           ← firmware satelity (C3 only)
+    ├── firmware.bin           ← output dla OTA (auto-kopiowany po build)
     └── copy_firmware.py       ← copy build → firmware.bin
 ```
 
@@ -1366,60 +1298,39 @@ pio device monitor -b 115200
 ```bash
 cd satelita
 
-# Compile dla wariantu bateria (esp32_bat)
-pio run -e esp32_bat
+# Compile (jedyny env)
+pio run -e esp32c3_zas
 
-# Plik output: .pio/build/esp32_bat/firmware.bin
+# Plik output: .pio/build/esp32c3_zas/firmware.bin
 # copy_firmware.py automatycznie kopie do: satelita/firmware.bin
+# Ten plik używany do OTA przez dashboard Matki
 ```
 
-### Flash Satelity (Raspberry Pi)
+### Flash Satelity (USB-C, pierwsze uruchomienie lub reset ID)
 
 ```bash
-# SSH na Pi
-ssh admin@pi.local
-# Hasło: admin
-
-# Flash:
-~/esp/bin/esptool.py --chip esp32 \
-  --port /dev/ttyUSB0 \
-  erase_flash && \
-~/esp/bin/esptool.py --chip esp32 \
-  --port /dev/ttyUSB0 \
-  --baud 460800 \
-  write_flash \
-    0x1000 /home/admin/bootloader.bin \
-    0x8000 /home/admin/partitions.bin \
-    0x10000 /home/admin/firmware.bin
-
-# Monitoruj serial (Satelita):
-stty -F /dev/ttyUSB0 115200 raw
-cat /dev/ttyUSB0
+cd satelita
+pio run -t upload -e esp32c3_zas
 ```
+
+C3 Super Mini flash bezpośrednio przez USB-C do Maca. Przed flashem zmień `DEFAULT_ID` w `main.cpp` jeśli to nie Satelita #1.
 
 ### Build flags
 
 **Matka** (`matka/platformio.ini`):
 ```ini
-build_flags = 
+build_flags =
     -DARDUINO_USB_CDC_ON_BOOT=1
     -DBOARD_HAS_PSRAM
 ```
 
 **Satelita** (`satelita/platformio.ini`):
 ```ini
-[env:esp32_bat]
-board = lolin_d32
-build_flags = 
-    -DARDUINO_USB_CDC_ON_BOOT=1
-    # default: typ=1 (bateria), GPIO4 DS18B20
-
 [env:esp32c3_zas]
 board = esp32-c3-devkitm-1
-build_flags = 
-    -DARDUINO_USB_CDC_ON_BOOT=1
+build_flags =
     -DPLATFORM_C3
-    # typ=2 (zasilacz), GPIO2 DS18B20
+    # typ=2 (zasilacz), GPIO4 DS18B20
 ```
 
 ### Partition scheme
@@ -1581,22 +1492,19 @@ Wygeneruj bot Telegram: `/newbot` u `@BotFather`
 4. **Build i test**:
    ```bash
    cd matka && pio run
-   cd ../satelita && pio run -e esp32_bat
+   cd ../satelita && pio run -e esp32c3_zas
    ```
 
 ### Etapy pracy
 
 #### Etap 1: Hardware setup
-- [ ] Zmierz pin ADC GPIO34 na WEMOS D1
-- [ ] Sprawdź współczynnik ADC (multimetrem)
-- [ ] Ustaw DEFAULT_ID i DEFAULT_TYP w satelita/src/main.cpp
-- [ ] Podłącz DS18B20 (GPIO4, 3.3V, GND + 4.7k pull-up)
+- [ ] Ustaw `DEFAULT_ID` w `satelita/src/main.cpp` (domyślnie 1)
+- [ ] Podłącz DS18B20 do GPIO4, 3.3V, GND + rezystor 4.7kΩ pull-up
 
 #### Etap 2: Upload initial firmware
-- [ ] Build Matki: `cd matka && pio run -t upload`
-- [ ] Build Satelity: `cd satelita && pio run -e esp32_bat`
-- [ ] Flash Satelity na Pi: `~/esp/bin/esptool.py...`
-- [ ] Serial monitor: sprawdź boot messages
+- [ ] Build Matki: `cd matka && pio run -t upload` (BOOT+EN)
+- [ ] Build Satelity: `cd satelita && pio run -t upload -e esp32c3_zas`
+- [ ] Serial monitor Matki: `pio device monitor`
 
 #### Etap 3: First communication
 - [ ] Monitoruj Matka serial: `pio device monitor`
@@ -1611,19 +1519,13 @@ Wygeneruj bot Telegram: `/newbot` u `@BotFather`
 
 #### Etap 5: OTA upload
 - [ ] Dashboard: upload `satelita/firmware.bin` (OTA dla Satelity)
-- [ ] Monitoruj Satelita serial: powinny zobaczyć download + restart
-- [ ] Sprawdź: seria wysyła nowy FW_VERSION
+- [ ] Satelita pobierze firmware i zrestartuje się automatycznie
+- [ ] Sprawdź wersję w dashboardzie po restarcie
 
 #### Etap 6: Telegram + alerty
-- [ ] `/status` → powinienieść temperatura + bateria
+- [ ] `/status` → temperatura + typ zasilania
 - [ ] `/set_max 8.5` → zmień próg
 - [ ] Zagrzej czujnik (dłoń) → sprawdź alert Telegram
-
-#### Etap 7: Deep Sleep (ostateczna)
-- [ ] Usuń `delay(10000)` z Satelity
-- [ ] Zamień na `esp_deep_sleep(interwal_s * 1000000)`
-- [ ] Test baterii: pomiary co 30 min
-- [ ] Monitoruj multimetrem: czy Deep Sleep (µA)
 
 ### Checklist przed wdrożeniem u teścia
 
@@ -1632,12 +1534,10 @@ Wygeneruj bot Telegram: `/newbot` u `@BotFather`
 - [ ] Dashboard responsive (mobile-friendly)
 - [ ] Telegram bot: wszystkie komendy
 - [ ] OTA dla Matki i Satelity: test end-to-end
-- [ ] Alerty Telegram: test wszystkich typów
+- [ ] Alerty Telegram: test wszystkich typów (nie spam podczas channel-hopping!)
 - [ ] Tryb cichy: test blokowania łagodnych
-- [ ] Deep Sleep Satelity: test czasów pracy baterii
 - [ ] NTP sync: test zmiany czasu (lato/zima)
-- [ ] Sonda DS18B20: test zachodowania pod wodą
-- [ ] ADC baterii: kalibracja na rzeczywistych procentach
+- [ ] Sonda DS18B20: test pod wodą
 - [ ] Zasięg ESP-NOW: test w rzeczywistym otoczeniu
 - [ ] Dokumentacja dla teścia: instrukcja obsługi
 
@@ -1681,13 +1581,13 @@ git reset --hard HEAD~1
 
 | Problem | Status | Notatka |
 |---------|--------|---------|
-| Deep Sleep | TODO | Aktualnie `delay(10000)`, włączyć w Etapie 2 |
-| OLED na C3 | TODO | Nie priorytetowe |
-| ADC baterii (GPIO34) | DEBUG | WEMOS zwraca 0%, sprawdzić pin |
-| MAC Matki hardcoded | KNOWN | W `satelita/src/main.cpp` `adresMatki[]` |
-| Zmiana kanału WiFi | SOLVED | Channel hopping + RTC RAM hint |
-| OTA timeout | SOLVED | Upload do PSRAM, write w loop() |
-| mDNS na starym Androidzie | KNOWN | Fallback IP na Dashboardzie |
+| MAC Matki hardcoded | KNOWN | `satelita/src/main.cpp:36` `adresMatki[]` — zmienić gdy wymiana Matki |
+| Zmiana kanału WiFi | SOLVED | Channel hopping 1–13, 3 próby/kanał, hint RTC RAM |
+| OTA timeout LittleFS | SOLVED | Serwowanie z PSRAM (nie LittleFS) |
+| Telegram spam podczas channel-hopping | SOLVED v5.1 | Sonda wykrywana po temp=0+bat=0+blad=true |
+| Dashboard migotanie | SOLVED v5.1 | renderCzujniki() tylko gdy dane się zmienią |
+| ACK opóźniony przez Telegram HTTP | SOLVED v5.1 | ACK wysyłany z onDataRecv callback, nie loop() |
+| mDNS na starym Androidzie | KNOWN | Fallback na IP w dashboardzie |
 
 ### TODO do następnych etapów
 
