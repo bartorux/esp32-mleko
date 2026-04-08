@@ -55,8 +55,11 @@ Logi satelity przez Pi (persistent — reconnectuje po deep sleep):
 ssh admin@pi.local "while true; do stty -F /dev/ttyUSB0 115200 raw 2>/dev/null; cat /dev/ttyUSB0 2>/dev/null; sleep 1; done"
 ```
 
-**OTA bin esp32_bat**: `satelita/firmware.bin` — auto-kopiowany przez `copy_firmware.py` po `pio run -e esp32_bat`.
+**OTA bin esp32_bat**: `satelita/firmware.bin` — auto-kopiowany przez `satelita/copy_firmware.py` po `pio run -e esp32_bat`.
 **OTA bin esp32c3_zas**: `.pio/build/esp32c3_zas/firmware.bin` — `copy_firmware.py` kopiuje tylko esp32_bat, dla C3 wskaż ręcznie.
+**Matka self-OTA**: `matka/copy_firmware.py` kopiuje zbudowane `.bin` do `matka/firmware.bin` — to plik wgrywany przez `POST /ota/matka` z dashboardu.
+
+**Uwaga na port Matki**: `upload_port` w `matka/platformio.ini` jest hardcoded (`/dev/cu.usbmodem212301`) — zmień jeśli port się różni po resecie.
 
 ## ESP-NOW Data Structures
 
@@ -75,12 +78,12 @@ Both devices share identical packed structs — keep them in sync when modifying
 - **DS18B20 quirk**: First reading after wake returns stale data — always do a warmup read and discard it
 - **All UI text and variable names are in Polish**
 - **ESP-NOW channel**: Matka inits ESP-NOW *after* WiFi.begin() so the channel matches the router. Satelita stores last successful channel in RTC RAM (`ostatni_kanal`) as a hint — tries it first on wake, then falls back to full channel hopping (1–13)
-- **MAC addresses**: Matka MAC is hardcoded in `satelita/src/main.cpp` (`adresMatki[]`). Satelita MACs are auto-learned on first ESP-NOW receive (auto-discovery)
+- **MAC addresses**: Matka MAC is hardcoded in `satelita/src/main.cpp:36` (`adresMatki[]` = `{0x80, 0xB5, 0x4E, 0xC3, 0x3C, 0xB8}`). **Must update when replacing Matka hardware** — read MAC from Serial Monitor after first boot. Satelita MACs are auto-learned on first ESP-NOW receive (auto-discovery)
 - **Multi-satellite**: Matka supports up to `MAX_SATELITY` (8) satellites. Each tracked in `SatelitaInfo` struct array with: id, MAC, type (battery/mains), last measurement, timestamps, OTA state. Satellites auto-register on first message.
 - **Matka is a single file** (`matka/src/main.cpp`) — dashboard HTML, captive portal HTML, API handlers, Telegram bot, ESP-NOW callbacks, and config persistence all live in one file
 - **Build flags**: Matka uses `ARDUINO_USB_CDC_ON_BOOT=1`, `BOARD_HAS_PSRAM`, and `board_build.arduino.memory_type = qio_opi` (required for OPI PSRAM on S3 N16R8). Satelita does NOT use `ARDUINO_USB_CDC_ON_BOOT` — `esp32_bat` uses `-DPLATFORM_ESP32`, `esp32c3_zas` uses `-DPLATFORM_C3`
 - **NVS Preferences**: Matka namespace `"mleko"` — keys: `prog_max`, `prog_min`, `prog_wzrost`, `interwal`, `interwal_zasil`, `cichy_od`, `cichy_do`. Satelita namespace `"satelita"` — keys: `id`, `typ`
-- **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/nazwy.json` (satellite display names), `/monitoring.json` (only_monitoring flags, only `true` entries stored), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null)
+- **LittleFS runtime paths**: `/wifi.json` (WiFi credentials), `/nazwy.json` (satellite display names), `/monitoring.json` (only_monitoring flags, only `true` entries stored), `/ota/satelita.bin` (satellite firmware, fallback when PSRAM `ota_buf` is null), `/hist_<id>` (per-satellite ring buffer, e.g. `/hist_1`, `/hist_2` — loaded/saved by `wczytajHistorie`/`zapiszHistorie`)
 - **Satellite names**: Stored in `satellite_names[MAX_SAT_ID][32]` global (indexed by ID). Loaded at boot from LittleFS, applied to `SatelitaInfo.nazwa` when satellite registers. Editable via `POST /api/satelita/nazwa` and pencil icon in dashboard.
 - **Satellite removal**: `POST /api/satelita/usun` removes satellite from the in-memory `satelity[]` array and calls `esp_now_del_peer()`. Names and `tylko_monitoring` flags are preserved in LittleFS — auto-restored when satellite reconnects. `satelity[]` is NOT persisted across reboots by design.
 
@@ -132,6 +135,13 @@ GET  /ota/satelita.bin     — serve stored satellite firmware (for OTA download
 - `ota_url_wyslany`: set when URL sent in ACK; cleared (along with `ota_pending`) on next message from satellite — regardless of `blad_czujnika`
 - `.bin` NOT auto-deleted — overwritten by next upload
 - Heartbeat alert suppressed while `ota_url_wyslany=true` (satellite silent during OTA)
+
+## Firmware versions
+
+- **Matka**: `FW_VERSION "5.0"` (`matka/src/main.cpp:19`)
+- **Satelita**: `SAT_FW_VERSION "2.8"` (`satelita/src/main.cpp:13`)
+
+Wersje widoczne w `/api/status` i wyświetlane w dashboardzie.
 
 ## Dependencies
 

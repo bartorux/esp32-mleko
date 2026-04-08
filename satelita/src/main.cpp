@@ -21,7 +21,7 @@
 
 #ifdef PLATFORM_C3
   #define DEFAULT_TYP       2     // zasilacz (C3 Super Mini)
-  #define PIN_DS18B20       2     // GPIO2 na C3 Super Mini
+  #define PIN_DS18B20       4     // GPIO4 na C3 Super Mini
 #else
   #define DEFAULT_TYP       1     // bateria (ESP32-S3 + 18650)
   #define PIN_DS18B20       4     // GPIO4 na WEMOS D1
@@ -300,6 +300,10 @@ void setup() {
     }
     id_czujnika = prefs.getUChar("id", DEFAULT_ID);
     typ_zasilania = prefs.getUChar("typ", DEFAULT_TYP);
+    // Zasilaczowa: startuje z krótkim interwałem zanim Matka wyśle konfigurację
+    if (typ_zasilania == 2 && rtc_interwal_s == INTERWAL_DOMYSLNY_S) {
+        rtc_interwal_s = 60;
+    }
     interwal_s = rtc_interwal_s; // przywróć interwał z poprzedniego cyklu
 
     Serial.println();
@@ -416,7 +420,8 @@ void loop() {
         esp_deep_sleep(sleep_s * 1000000ULL);
     } else {
         // Zasilacz — delay w pętli (always on)
-        Serial.printf("[SLEEP] Czekam %lu s...\n\n", (unsigned long)interwal_s);
-        delay(interwal_s * 1000);
+        uint32_t czekaj_s = polaczono ? interwal_s : 60; // brak Matki → krótki retry
+        Serial.printf("[SLEEP] Czekam %lu s...\n\n", (unsigned long)czekaj_s);
+        delay(czekaj_s * 1000);
     }
 }
