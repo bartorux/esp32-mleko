@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.4.3"
+#define FW_VERSION "5.4.4"
 
 // === WiFi ===
 
@@ -1237,9 +1237,8 @@ html+='<div class="card"><h2>'+nazwaDisplay+' <span onclick="zmienNazwe('+s.id+'
 html+='<div style="text-align:center;margin-bottom:12px"><span class="'+badgeCls+'">'+badgeText+'</span></div>';
 html+='<div class="temp-display"><span class="'+tempClass+'" style="color:'+kolor+'">'+tempVal+'</span><span class="temp-unit">&deg;C</span>'+trendHtml+'</div>';
 html+='<div class="info-grid">';
-if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';}
-else{html+='<div class="info-item"><div class="info-label">Zasilanie</div><div class="info-value" style="color:#34c759">Sieciowe</div></div>';}
-html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value" id="ago_'+s.id+'">'+s.ostatni+'</div></div>';
+if(s.typ===1){html+='<div class="info-item"><div class="info-label">Bateria</div><div class="info-value'+(s.bateria>15?' bat-ok':s.bateria>5?' bat-mid':' bat-low')+'">'+s.bateria+'%</div></div>';html+='<div class="info-item"><div class="info-label">Ostatni pomiar</div><div class="info-value" id="ago_'+s.id+'">'+s.ostatni+'</div></div>';}
+else{html+='<div class="info-item" style="grid-column:1/-1"><div class="info-label">Ostatni pomiar</div><div class="info-value" id="ago_'+s.id+'">'+s.ostatni+'</div></div>';}
 html+='</div>';
 let monLabel=s.tylko_monitoring?'&#128065; Tylko monitoring':'&#128276; Alerty aktywne';
 let monStyle=s.tylko_monitoring?'background:#f5f5f7;color:#6e6e73;border:1px solid #d2d2d7':'background:#e8f9ef;color:#1a7f3c;border:1px solid #b7f0cd';
