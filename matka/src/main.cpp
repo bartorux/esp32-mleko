@@ -16,7 +16,7 @@
 
 // === Wersja ===
 
-#define FW_VERSION "5.4.4"
+#define FW_VERSION "5.4.5"
 
 // === WiFi ===
 
@@ -529,6 +529,7 @@ void sprawdzAlerty(SatelitaInfo *s) {
         unsigned long cooldown = (unsigned long)alert_cykl_s * 1000UL;
         if (s->pomiar.temperatura > prog_max) {
             if (s->ostatni_alert_temp_high == 0 || millis() - s->ostatni_alert_temp_high >= cooldown) {
+                addLog("[ALERT] Sat#%d: temp wysoka %.1f°C (prog %.1f)", s->id, s->pomiar.temperatura, prog_max);
                 wyslijTelegram("🔴 <b>Smart Mleko</b>\n" + prefix + "Temperatura za wysoka: <b>"
                     + String(s->pomiar.temperatura, 1) + "°C</b> (próg: " + String(prog_max, 1) + "°C)");
                 s->ostatni_alert_temp_high = millis();
@@ -536,6 +537,7 @@ void sprawdzAlerty(SatelitaInfo *s) {
         }
         if (prog_min > -50 && s->pomiar.temperatura < prog_min) {
             if (s->ostatni_alert_temp_low == 0 || millis() - s->ostatni_alert_temp_low >= cooldown) {
+                addLog("[ALERT] Sat#%d: temp niska %.1f°C (prog %.1f)", s->id, s->pomiar.temperatura, prog_min);
                 wyslijTelegram("🔵 <b>Smart Mleko</b>\n" + prefix + "Temperatura za niska: <b>"
                     + String(s->pomiar.temperatura, 1) + "°C</b> (próg: " + String(prog_min, 1) + "°C)");
                 s->ostatni_alert_temp_low = millis();
@@ -550,13 +552,16 @@ void sprawdzAlerty(SatelitaInfo *s) {
     bool krytyczny = false;
 
     if (s->pomiar.blad_czujnika) {
+        addLog("[ALERT] Sat#%d: blad czujnika", s->id);
         msg = "⚠️ <b>Smart Mleko</b>\n" + prefix + "Błąd czujnika temperatury!";
         krytyczny = true;
     } else if (s->pomiar.bateria_procent <= 5 && s->typ == 1) {
+        addLog("[ALERT] Sat#%d: bateria krytyczna %d%%", s->id, s->pomiar.bateria_procent);
         msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Bateria krytyczna: <b>"
             + String(s->pomiar.bateria_procent) + "%</b>";
         krytyczny = true;
     } else if (s->pomiar.bateria_procent <= 15 && s->typ == 1) {
+        addLog("[ALERT] Sat#%d: niski poziom baterii %d%%", s->id, s->pomiar.bateria_procent);
         msg = "🔋 <b>Smart Mleko</b>\n" + prefix + "Niski poziom baterii: <b>"
             + String(s->pomiar.bateria_procent) + "%</b>";
     } else if (!s->pomiar.blad_czujnika && prog_wzrost > 0 && s->hist_count >= 2) {
@@ -567,6 +572,7 @@ void sprawdzAlerty(SatelitaInfo *s) {
             if (dt > 0) {
                 float rate = (s->historia[last_idx].temperatura - s->historia[prev_idx].temperatura) / dt;
                 if (rate > prog_wzrost) {
+                    addLog("[ALERT] Sat#%d: szybki wzrost +%.1f C/h", s->id, rate);
                     msg = "📈 <b>Smart Mleko</b>\n" + prefix + "Szybki wzrost temperatury: <b>+"
                         + String(rate, 1) + "°C/h</b>\n(próg: " + String(prog_wzrost, 1) + "°C/h)";
                 }
@@ -593,6 +599,7 @@ void sprawdzHeartbeat() {
         if ((millis() - s->ostatni_czas) > timeout) {
             if (s->ota_url_wyslany) continue; // satelita jest w trakcie OTA — nie alarmuj
             if (millis() - ostatni_telegram < TELEGRAM_COOLDOWN && ostatni_telegram > 0) return;
+            addLog("[ALERT] Satelita #%d milczy od: %s", s->id, czasOd(s->ostatni_czas).c_str());
             wyslijTelegram("📡 <b>Smart Mleko</b>\nCzujnik #" + String(s->id) +
                 " milczy od: " + czasOd(s->ostatni_czas));
             ostatni_telegram = millis();
